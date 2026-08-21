@@ -43,6 +43,7 @@ export default function App() {
   const [gifFrameLimit, setGifFrameLimit] = useState(100);
   const [exportFrame, setExportFrame] = useState(0);
   const [exportTotalFrames, setExportTotalFrames] = useState(0);
+  const [isGifLooping, setIsGifLooping] = useState(true);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -69,6 +70,7 @@ export default function App() {
         if (parsed.aspectRatio !== undefined) setAspectRatio(parsed.aspectRatio);
         if (parsed.gifFps !== undefined) setGifFps(parsed.gifFps);
         if (parsed.gifFrameLimit !== undefined) setGifFrameLimit(parsed.gifFrameLimit);
+        if (parsed.isGifLooping !== undefined) setIsGifLooping(parsed.isGifLooping);
       } catch (e) {
         console.error("Failed to load settings", e);
       }
@@ -80,10 +82,10 @@ export default function App() {
     const settings = {
       targetColors, similarity, colorBlend, shadingTolerance, contiguous, spillSuppression,
       strokeWidth, strokeColor, edgeShift, edgeSoftness, useDithering, bgMode, customBgColor, aspectRatio,
-      gifFps, gifFrameLimit
+      gifFps, gifFrameLimit, isGifLooping
     };
     localStorage.setItem('chromaKeySettings', JSON.stringify(settings));
-  }, [targetColors, similarity, colorBlend, shadingTolerance, contiguous, spillSuppression, strokeWidth, strokeColor, edgeShift, edgeSoftness, useDithering, bgMode, customBgColor, aspectRatio, gifFps, gifFrameLimit]);
+  }, [targetColors, similarity, colorBlend, shadingTolerance, contiguous, spillSuppression, strokeWidth, strokeColor, edgeShift, edgeSoftness, useDithering, bgMode, customBgColor, aspectRatio, gifFps, gifFrameLimit, isGifLooping]);
 
   const getCropDimensions = (videoWidth: number, videoHeight: number, ratio: string) => {
     let targetRatio = videoWidth / videoHeight;
@@ -420,7 +422,7 @@ export default function App() {
           index = applyPalette(data, palette, 'rgba4444');
         }
         
-        gif.writeFrame(index, width, height, { palette, transparent: true, delay });
+        gif.writeFrame(index, width, height, { palette, transparent: true, delay, repeat: isGifLooping ? 0 : -1 });
       }
       
       frameCount++;
@@ -972,6 +974,15 @@ export default function App() {
                     {useDithering && <div className="w-1.5 h-1.5 bg-black" />}
                   </div>
                   <span className="text-[9px] uppercase tracking-widest text-[#888] group-hover:text-[#aaa] transition-colors">Dither GIF</span>
+                </label>
+                <label 
+                  className="flex items-center justify-center gap-2 cursor-pointer group"
+                  onClick={(e) => { e.preventDefault(); setIsGifLooping(!isGifLooping); }}
+                >
+                  <div className={`w-3 h-3 border ${isGifLooping ? 'bg-white border-white' : 'border-[#444] group-hover:border-[#666]'} flex items-center justify-center transition-colors`}>
+                    {isGifLooping && <div className="w-1.5 h-1.5 bg-black" />}
+                  </div>
+                  <span className="text-[9px] uppercase tracking-widest text-[#888] group-hover:text-[#aaa] transition-colors">Loop GIF</span>
                 </label>
               </div>
             </div>
