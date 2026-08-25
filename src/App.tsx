@@ -433,16 +433,40 @@ export default function App() {
         }
         
         const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const palette = quantize(data, 256, { format: 'rgba4444', oneBitAlpha: true });
-        
-        let index;
-        if (useDithering) {
-          index = applyPaletteDithered(data, width, height, palette);
+        const hasKeyedColors = targetColors.length > 0;
+
+        let palette: number[][];
+        let index: Uint8Array;
+
+        if (hasKeyedColors) {
+          palette = quantize(data, 256, { format: 'rgba4444', oneBitAlpha: true });
+          const transparentIdx = palette.findIndex(p => p[3] !== undefined && p[3] < 128);
+          if (useDithering) {
+            index = applyPaletteDithered(data, width, height, palette);
+          } else {
+            index = applyPalette(data, palette, 'rgba4444');
+          }
+          gif.writeFrame(index, width, height, { 
+            palette, 
+            transparent: transparentIdx !== -1, 
+            transparentIndex: transparentIdx !== -1 ? transparentIdx : undefined,
+            delay, 
+            repeat: isGifLooping ? 0 : -1 
+          });
         } else {
-          index = applyPalette(data, palette, 'rgba4444');
+          palette = quantize(data, 256, { format: 'rgb565' });
+          if (useDithering) {
+            index = applyPaletteDithered(data, width, height, palette);
+          } else {
+            index = applyPalette(data, palette, 'rgb565');
+          }
+          gif.writeFrame(index, width, height, { 
+            palette, 
+            transparent: false, 
+            delay, 
+            repeat: isGifLooping ? 0 : -1 
+          });
         }
-        
-        gif.writeFrame(index, width, height, { palette, transparent: true, delay, repeat: isGifLooping ? 0 : -1 });
       }
       
       frameCount++;

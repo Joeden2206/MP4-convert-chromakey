@@ -20,7 +20,7 @@ export function applyPaletteDithered(
     // Find transparent color index in palette if any
     let transparentIndex = -1;
     for (let p = 0; p < palette.length; p++) {
-        if (palette[p][3] < 128) {
+        if (palette[p][3] !== undefined && palette[p][3] < 128) {
             transparentIndex = p;
             break;
         }
