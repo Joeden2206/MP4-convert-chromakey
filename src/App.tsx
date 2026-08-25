@@ -12,7 +12,8 @@ import { applyPaletteDithered } from './lib/dither';
 import { GIFEncoder, quantize, applyPalette } from 'gifenc';
 
 export default function App() {
-  const [videoSrc, setVideoSrc] = useState<string | null>(null);
+  const [videoQueue, setVideoQueue] = useState<{file: File, url: string, name: string}[]>([]);
+  const [activeIndex, setActiveIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [targetColors, setTargetColors] = useState<RGBColor[]>([]);
   const [similarity, setSimilarity] = useState(40);
@@ -44,7 +45,12 @@ export default function App() {
   const [exportFrame, setExportFrame] = useState(0);
   const [exportTotalFrames, setExportTotalFrames] = useState(0);
   const [isGifLooping, setIsGifLooping] = useState(true);
+  const [isBatchExporting, setIsBatchExporting] = useState(false);
+  const [batchProgressText, setBatchProgressText] = useState('');
   
+  const videoSrc = videoQueue[activeIndex]?.url || null;
+  const originalFileName = videoQueue[activeIndex]?.name || 'export';
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -195,19 +201,28 @@ export default function App() {
     }
   }, [drawFrame, isPlaying, isExporting, videoSrc]);
 
-  const processFile = (file: File) => {
-    if (!file || !file.type.startsWith('video/')) return;
-    
-    const url = URL.createObjectURL(file);
-    setVideoSrc(url);
+  const processFiles = (files: FileList | File[]) => {
+    const newVideos = Array.from(files).filter(f => f.type.startsWith('video/')).map(file => ({
+      file,
+      url: URL.createObjectURL(file),
+      name: file.name.substring(0, file.name.lastIndexOf('.')) || file.name
+    }));
+
+    if (newVideos.length === 0) return;
+
+    setVideoQueue(prev => {
+      const next = [...prev, ...newVideos];
+      if (prev.length === 0) setActiveIndex(0);
+      return next;
+    });
+
     setIsPlaying(false);
     setCurrentTime(0);
     setDuration(0);
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) processFile(file);
+    if (e.target.files) processFiles(e.target.files);
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -223,8 +238,7 @@ export default function App() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file) processFile(file);
+    if (e.dataTransfer.files) processFiles(e.dataTransfer.files);
   };
 
   const togglePlay = () => {
@@ -273,93 +287,99 @@ export default function App() {
     setIsPicking(false);
   };
 
-  const handleExportWebM = () => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas) return;
-    
-    setIsExporting(true);
-    setExportType('WebM');
-    setExportProgress(0);
-    setIsPlaying(false);
-    video.pause();
-    video.currentTime = 0;
-    
-    const dims = getCropDimensions(video.videoWidth, video.videoHeight, aspectRatio);
-    canvas.width = Math.floor(dims.dw);
-    canvas.height = Math.floor(dims.dh);
-    
-    const stream = canvas.captureStream(30); 
-    let options = { mimeType: 'video/webm; codecs=vp8' };
-    let mediaRecorder: MediaRecorder;
-    try {
-        mediaRecorder = new MediaRecorder(stream, options);
-    } catch (e) {
-        mediaRecorder = new MediaRecorder(stream);
-    }
-    
-    const chunks: Blob[] = [];
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) chunks.push(e.data);
-    };
-    
-    mediaRecorder.onstop = () => {
-      const blob = new Blob(chunks, { type: 'video/webm' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'chroma-key-export.webm';
-      a.click();
-      URL.revokeObjectURL(url);
-      setIsExporting(false);
-      setExportType(null);
+  const exportWebMPromise = (fileName: string): Promise<void> => {
+    return new Promise((resolve) => {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (!video || !canvas) return resolve();
+      
+      setIsExporting(true);
       setExportProgress(0);
-      video.currentTime = currentTime; // Restore time
-    };
-    
-    mediaRecorder.start();
-    video.play();
-    
-    const exportLoop = () => {
-      if (video.currentTime >= video.duration || video.ended) {
-        mediaRecorder.stop();
-        video.pause();
-        return;
+      setIsPlaying(false);
+      video.pause();
+      video.currentTime = 0;
+      
+      const dims = getCropDimensions(video.videoWidth, video.videoHeight, aspectRatio);
+      canvas.width = Math.floor(dims.dw);
+      canvas.height = Math.floor(dims.dh);
+      
+      const stream = canvas.captureStream(30); 
+      let options = { mimeType: 'video/webm; codecs=vp8' };
+      let mediaRecorder: MediaRecorder;
+      try {
+          mediaRecorder = new MediaRecorder(stream, options);
+      } catch (e) {
+          mediaRecorder = new MediaRecorder(stream);
       }
       
-      const hiddenCanvas = hiddenCanvasRef.current;
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      if (ctx && hiddenCanvas) {
-        if (hiddenCanvas.width !== video.videoWidth || hiddenCanvas.height !== video.videoHeight) {
-          hiddenCanvas.width = video.videoWidth;
-          hiddenCanvas.height = video.videoHeight;
+      const chunks: Blob[] = [];
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunks.push(e.data);
+      };
+      
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(chunks, { type: 'video/webm' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${fileName}.webm`;
+        a.click();
+        URL.revokeObjectURL(url);
+        setIsExporting(false);
+        setExportProgress(0);
+        video.currentTime = currentTime; // Restore time
+        resolve();
+      };
+      
+      mediaRecorder.start();
+      video.play();
+      
+      const exportLoop = () => {
+        if (video.currentTime >= video.duration || video.ended) {
+          mediaRecorder.stop();
+          video.pause();
+          return;
         }
         
-        const hiddenCtx = hiddenCanvas.getContext('2d', { willReadFrequently: true });
-        if (hiddenCtx) {
-          hiddenCtx.clearRect(0, 0, hiddenCanvas.width, hiddenCanvas.height);
-          hiddenCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
-          applyChromaKey(hiddenCtx, hiddenCanvas, targetColors, similarity, colorBlend, edgeShift, edgeSoftness, shadingTolerance, contiguous, spillSuppression, strokeWidth, strokeColor);
+        const hiddenCanvas = hiddenCanvasRef.current;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (ctx && hiddenCanvas) {
+          if (hiddenCanvas.width !== video.videoWidth || hiddenCanvas.height !== video.videoHeight) {
+            hiddenCanvas.width = video.videoWidth;
+            hiddenCanvas.height = video.videoHeight;
+          }
           
-          ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(hiddenCanvas, dims.sx, dims.sy, dims.sw, dims.sh, 0, 0, canvas.width, canvas.height);
+          const hiddenCtx = hiddenCanvas.getContext('2d', { willReadFrequently: true });
+          if (hiddenCtx) {
+            hiddenCtx.clearRect(0, 0, hiddenCanvas.width, hiddenCanvas.height);
+            hiddenCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+            applyChromaKey(hiddenCtx, hiddenCanvas, targetColors, similarity, colorBlend, edgeShift, edgeSoftness, shadingTolerance, contiguous, spillSuppression, strokeWidth, strokeColor);
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(hiddenCanvas, dims.sx, dims.sy, dims.sw, dims.sh, 0, 0, canvas.width, canvas.height);
+          }
         }
-      }
+        
+        setExportProgress((video.currentTime / video.duration) * 100);
+        requestAnimationFrame(exportLoop);
+      };
       
-      setExportProgress((video.currentTime / video.duration) * 100);
-      requestAnimationFrame(exportLoop);
-    };
-    
-    exportLoop();
+      exportLoop();
+    });
   };
 
-  const handleExportGIF = async () => {
+  const handleExportWebM = async () => {
+    setExportType('WebM');
+    await exportWebMPromise(originalFileName);
+    setExportType(null);
+  };
+
+  const exportGIFPromise = async (fileName: string): Promise<void> => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas || video.duration === Infinity) return;
 
     setIsExporting(true);
-    setExportType('GIF');
     setExportProgress(0);
     setIsPlaying(false);
     video.pause();
@@ -435,16 +455,62 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'chroma-key-export.gif';
+    a.download = `${fileName}.gif`;
     a.click();
     URL.revokeObjectURL(url);
     setIsExporting(false);
-    setExportType(null);
     setExportProgress(0);
     
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     video.currentTime = currentTime; // Restore time
+  };
+
+  const handleExportGIF = async () => {
+    setExportType('GIF');
+    await exportGIFPromise(originalFileName);
+    setExportType(null);
+  };
+
+  const doBatchExport = async (type: 'GIF' | 'WebM') => {
+    if (videoQueue.length === 0) return;
+    
+    setIsBatchExporting(true);
+    setExportType(type);
+    
+    const originalIndex = activeIndex;
+    
+    for (let i = 0; i < videoQueue.length; i++) {
+      setBatchProgressText(`File ${i + 1} of ${videoQueue.length} (${videoQueue[i].name})`);
+      
+      setActiveIndex(i);
+      
+      // Wait for React to render and video to load the new source
+      await new Promise<void>(resolve => {
+        const checkLoad = () => {
+          if (videoRef.current && videoRef.current.readyState >= 2 && videoRef.current.src === videoQueue[i].url) {
+             resolve();
+          } else {
+             setTimeout(checkLoad, 50);
+          }
+        };
+        setTimeout(checkLoad, 50);
+      });
+
+      // Wait a bit more for onLoadedMetadata sizes to propagate to canvases
+      await new Promise(r => setTimeout(r, 200));
+      
+      if (type === 'WebM') {
+        await exportWebMPromise(videoQueue[i].name);
+      } else {
+        await exportGIFPromise(videoQueue[i].name);
+      }
+    }
+    
+    setActiveIndex(originalIndex);
+    setIsBatchExporting(false);
+    setExportType(null);
+    setBatchProgressText('');
   };
 
   const removeColor = (idx: number) => {
@@ -575,6 +641,33 @@ export default function App() {
 
                 {/* Top Controls Overlay */}
                 <div className="absolute top-6 right-6 z-20 flex gap-3">
+                  {videoQueue.length > 1 && !isBatchExporting && (
+                    <div className="flex bg-black/60 backdrop-blur-md border border-white/10 rounded-full px-2 items-center">
+                      <span className="text-[9px] uppercase text-[#888] tracking-widest mx-2">Queue:</span>
+                      <div className="flex gap-1 overflow-x-auto custom-scrollbar max-w-[200px] py-1">
+                        {videoQueue.map((v, i) => (
+                           <button 
+                              key={i}
+                              onClick={() => setActiveIndex(i)}
+                              className={`px-2 py-0.5 text-[9px] font-mono whitespace-nowrap rounded-full transition-colors flex-shrink-0 ${i === activeIndex ? 'bg-white text-black' : 'bg-[#222] text-[#888] hover:bg-[#333]'}`}
+                           >
+                              {v.name.substring(0, 10)}{v.name.length > 10 ? '...' : ''}
+                           </button>
+                        ))}
+                      </div>
+                      <button 
+                         onClick={() => {
+                            setVideoQueue([]);
+                            setActiveIndex(0);
+                         }}
+                         className="ml-2 mr-2 text-red-400 hover:text-red-300 transition-colors flex-shrink-0"
+                         title="Clear Queue"
+                      >
+                         <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )}
+
                   <button 
                     onMouseDown={() => setShowOriginal(true)}
                     onMouseUp={() => setShowOriginal(false)}
@@ -589,8 +682,8 @@ export default function App() {
 
                   <label className="flex items-center gap-2 bg-black/60 backdrop-blur-md border border-white/10 px-3 py-1.5 text-[9px] uppercase tracking-widest text-[#888] hover:text-white hover:border-white/30 transition-colors rounded-full cursor-pointer">
                     <Upload className="w-3 h-3" />
-                    New Video
-                    <input type="file" accept="video/*" className="hidden" onChange={handleFileUpload} />
+                    {videoQueue.length > 0 ? 'Add Videos' : 'New Video'}
+                    <input type="file" accept="video/*" multiple className="hidden" onChange={handleFileUpload} />
                   </label>
                 </div>
                 
@@ -604,13 +697,16 @@ export default function App() {
                 )}
 
                 {/* Export Progress Overlay */}
-                {isExporting && (
+                {(isExporting || isBatchExporting) && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-md z-50">
                     <div className="border border-[#333] p-8 w-80 text-center bg-[#0A0A0B]">
                        <h3 className="text-[10px] uppercase tracking-widest text-white mb-4">
-                         Exporting {exportType}
+                         {isBatchExporting ? `Batch Exporting ${exportType}` : `Exporting ${exportType}`}
                          {exportType === 'GIF' && ` (${exportFrame}/${exportTotalFrames} F)`}
                        </h3>
+                       {isBatchExporting && (
+                         <div className="text-[9px] text-[#888] font-mono mb-4">{batchProgressText}</div>
+                       )}
                        <div className="w-full bg-[#222] h-[2px] mb-4 relative">
                          <div 
                            className="bg-white h-full transition-all duration-300 ease-out absolute top-0 left-0" 
@@ -668,7 +764,7 @@ export default function App() {
                    <span className="text-[10px] font-bold tracking-widest text-white uppercase">Upload Video</span>
                    <span className="text-[9px] uppercase tracking-widest text-[#666] mt-2">MP4 / WEBM</span>
                  </div>
-                 <input type="file" accept="video/*" className="hidden" onChange={handleFileUpload} />
+                 <input type="file" accept="video/*" multiple className="hidden" onChange={handleFileUpload} />
                </label>
             </div>
           )}
@@ -950,7 +1046,7 @@ export default function App() {
             <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={handleExportWebM}
-                disabled={!videoSrc || isExporting}
+                disabled={!videoSrc || isExporting || isBatchExporting}
                 className="p-4 border border-white hover:bg-white hover:text-black flex flex-col items-center justify-center gap-2 transition-colors disabled:opacity-30 disabled:border-[#333] disabled:hover:bg-transparent disabled:hover:text-[#E0E0E0]"
               >
                 <span className="text-[10px] font-bold tracking-widest">WEBM</span>
@@ -960,7 +1056,7 @@ export default function App() {
               <div className="flex flex-col gap-2">
                 <button
                   onClick={handleExportGIF}
-                  disabled={!videoSrc || isExporting}
+                  disabled={!videoSrc || isExporting || isBatchExporting}
                   className="flex-1 p-4 border border-[#333] hover:border-[#666] flex flex-col items-center justify-center gap-2 transition-colors disabled:opacity-30 disabled:hover:border-[#333]"
                 >
                   <span className="text-[10px] font-bold tracking-widest text-[#aaa]">GIF</span>
@@ -986,6 +1082,30 @@ export default function App() {
                 </label>
               </div>
             </div>
+
+            {videoQueue.length > 1 && (
+              <div className="mt-4 border-t border-[#222] pt-4">
+                <div className="flex justify-between items-center text-[9px] uppercase tracking-widest mb-3">
+                  <span className="text-[#888]">Batch Process ({videoQueue.length} files)</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => doBatchExport('WebM')}
+                    disabled={isExporting || isBatchExporting}
+                    className="p-3 border border-[#333] hover:bg-[#222] flex flex-col items-center justify-center gap-1 transition-colors disabled:opacity-30"
+                  >
+                    <span className="text-[9px] tracking-widest text-white">BATCH WEBM</span>
+                  </button>
+                  <button
+                    onClick={() => doBatchExport('GIF')}
+                    disabled={isExporting || isBatchExporting}
+                    className="p-3 border border-[#333] hover:bg-[#222] flex flex-col items-center justify-center gap-1 transition-colors disabled:opacity-30"
+                  >
+                    <span className="text-[9px] tracking-widest text-[#aaa]">BATCH GIF</span>
+                  </button>
+                </div>
+              </div>
+            )}
             
             <p className="mt-6 text-[9px] leading-relaxed text-[#555] font-serif italic">
                Hardware acceleration enabled. Real-time extraction with live preview.
