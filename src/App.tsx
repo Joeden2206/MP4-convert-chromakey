@@ -211,10 +211,10 @@ export default function App() {
     if (newVideos.length === 0) return;
 
     setVideoQueue(prev => {
-      const next = [...prev, ...newVideos];
-      if (prev.length === 0) setActiveIndex(0);
-      return next;
+      prev.forEach(v => URL.revokeObjectURL(v.url));
+      return newVideos;
     });
+    setActiveIndex(0);
 
     setIsPlaying(false);
     setCurrentTime(0);
