@@ -28,7 +28,9 @@ function fillHoles(data: Uint8ClampedArray, w: number, h: number, seedPositions:
     
     let head = 0;
     let tail = 0;
-    const threshold = 254; // Treat anything < 255 as potentially background to flood through
+    // Lower threshold to 128 to prevent the flood fill from leaking through semi-transparent 
+    // anti-aliased edges (which might have alpha values like 200-254) into internal holes.
+    const threshold = 128; 
 
     // Seed custom positions
     for (const pos of seedPositions) {
