@@ -1,6 +1,6 @@
 {
   "name": "Chroma Key Video Editor",
-  "description": "Remove backgrounds from videos using a color picker, adjust threshold and smoothness, and export as transparent WebM or GIF.",
+  "description": "Remove backgrounds from videos using AI Auto-Matte (WebGPU/WASM) or multi-color Chroma Key, with real-time preview and transparent WebM/GIF export.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

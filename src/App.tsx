@@ -4,10 +4,16 @@
  */
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Upload, Play, Pause, Download, Pipette, Trash2, Video, FileVideo, Crosshair, AlertCircle, Eye } from 'lucide-react';
-import { RGBColor } from './types';
+import { 
+  Upload, Play, Pause, Download, Pipette, Trash2, Video, FileVideo, 
+  Crosshair, AlertCircle, Eye, Sparkles, Wand2, Loader2, CheckCircle2,
+  Layers, Square, Plus, ShieldCheck, ShieldAlert, Sliders, Activity
+} from 'lucide-react';
+import { RGBColor, CustomMatteZone } from './types';
 import { applyChromaKey } from './lib/chromaKey';
+import { applyAiMatting, preloadAiSegmenter, AiMattingStatus } from './lib/aiMatting';
 import { applyPaletteDithered } from './lib/dither';
+import { applyCustomMatteZones } from './lib/vectorContour';
 // @ts-ignore
 import { GIFEncoder, quantize, applyPalette } from 'gifenc';
 
@@ -15,6 +21,24 @@ export default function App() {
   const [videoQueue, setVideoQueue] = useState<{file: File, url: string, name: string}[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [extractionMode, setExtractionMode] = useState<'chroma' | 'ai'>('chroma');
+  const [aiThreshold, setAiThreshold] = useState(50);
+  const [aiEdgeShift, setAiEdgeShift] = useState(-1.5);
+  const [aiSmoothness, setAiSmoothness] = useState(2.0);
+  const [aiFeather, setAiFeather] = useState(1.0);
+  const [aiDefringe, setAiDefringe] = useState(40);
+  const [aiInvert, setAiInvert] = useState(false);
+  const [aiStatus, setAiStatus] = useState<AiMattingStatus>('idle');
+  const [aiError, setAiError] = useState<string | null>(null);
+
+  // Vector Contour & Custom Zones
+  const [showVectorContour, setShowVectorContour] = useState(false);
+  const [vectorContourColor, setVectorContourColor] = useState('#00f0ff');
+  const [customZones, setCustomZones] = useState<CustomMatteZone[]>([]);
+  const [activeMatteTool, setActiveMatteTool] = useState<'none' | 'remove_rect' | 'keep_rect'>('none');
+  const [drawingStart, setDrawingStart] = useState<{ x: number; y: number } | null>(null);
+  const [drawingCurrent, setDrawingCurrent] = useState<{ x: number; y: number } | null>(null);
+
   const [targetColors, setTargetColors] = useState<RGBColor[]>([]);
   const [similarity, setSimilarity] = useState(40);
   const [colorBlend, setColorBlend] = useState(20);
@@ -48,11 +72,28 @@ export default function App() {
   const [isBatchExporting, setIsBatchExporting] = useState(false);
   const [batchProgressText, setBatchProgressText] = useState('');
   
+  // Mobile / Responsive Layout States
+  const [mobileTab, setMobileTab] = useState<'view' | 'tune' | 'export'>('view');
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  
   const videoSrc = videoQueue[activeIndex]?.url || null;
   const originalFileName = videoQueue[activeIndex]?.name || 'export';
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // Preload AI model when AI extraction mode is active
+  useEffect(() => {
+    if (extractionMode === 'ai') {
+      preloadAiSegmenter((status, err) => {
+        setAiStatus(status);
+        if (err) setAiError(err);
+      }).catch(err => {
+        setAiStatus('error');
+        setAiError(err?.message || 'Error loading AI model');
+      });
+    }
+  }, [extractionMode]);
 
   // Load settings from localStorage on mount
   useEffect(() => {
@@ -60,6 +101,16 @@ export default function App() {
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
+        if (parsed.extractionMode) setExtractionMode(parsed.extractionMode);
+        if (parsed.aiThreshold !== undefined) setAiThreshold(parsed.aiThreshold);
+        if (parsed.aiEdgeShift !== undefined) setAiEdgeShift(parsed.aiEdgeShift);
+        if (parsed.aiSmoothness !== undefined) setAiSmoothness(parsed.aiSmoothness);
+        if (parsed.aiFeather !== undefined) setAiFeather(parsed.aiFeather);
+        if (parsed.aiDefringe !== undefined) setAiDefringe(parsed.aiDefringe);
+        if (parsed.aiInvert !== undefined) setAiInvert(parsed.aiInvert);
+        if (parsed.showVectorContour !== undefined) setShowVectorContour(parsed.showVectorContour);
+        if (parsed.vectorContourColor !== undefined) setVectorContourColor(parsed.vectorContourColor);
+        if (parsed.customZones !== undefined) setCustomZones(parsed.customZones);
         if (parsed.targetColors) setTargetColors(parsed.targetColors);
         if (parsed.similarity !== undefined) setSimilarity(parsed.similarity);
         if (parsed.colorBlend !== undefined) setColorBlend(parsed.colorBlend);
@@ -86,12 +137,14 @@ export default function App() {
   // Save settings to localStorage when they change
   useEffect(() => {
     const settings = {
+      extractionMode, aiThreshold, aiEdgeShift, aiSmoothness, aiFeather, aiDefringe, aiInvert,
+      showVectorContour, vectorContourColor, customZones,
       targetColors, similarity, colorBlend, shadingTolerance, contiguous, spillSuppression,
       strokeWidth, strokeColor, edgeShift, edgeSoftness, useDithering, bgMode, customBgColor, aspectRatio,
       gifFps, gifFrameLimit, isGifLooping
     };
     localStorage.setItem('chromaKeySettings', JSON.stringify(settings));
-  }, [targetColors, similarity, colorBlend, shadingTolerance, contiguous, spillSuppression, strokeWidth, strokeColor, edgeShift, edgeSoftness, useDithering, bgMode, customBgColor, aspectRatio, gifFps, gifFrameLimit, isGifLooping]);
+  }, [extractionMode, aiThreshold, aiEdgeShift, aiSmoothness, aiFeather, aiDefringe, aiInvert, showVectorContour, vectorContourColor, customZones, targetColors, similarity, colorBlend, shadingTolerance, contiguous, spillSuppression, strokeWidth, strokeColor, edgeShift, edgeSoftness, useDithering, bgMode, customBgColor, aspectRatio, gifFps, gifFrameLimit, isGifLooping]);
 
   const getCropDimensions = (videoWidth: number, videoHeight: number, ratio: string) => {
     let targetRatio = videoWidth / videoHeight;
@@ -127,6 +180,7 @@ export default function App() {
     };
   };
   const hiddenCanvasRef = useRef<HTMLCanvasElement>(null);
+  const isDrawingRef = useRef(false);
 
   const formatTime = (time: number) => {
     if (isNaN(time)) return "00:00.00";
@@ -136,60 +190,130 @@ export default function App() {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
   };
 
-  const drawFrame = useCallback(() => {
+  const drawFrame = useCallback(async () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     const hiddenCanvas = hiddenCanvasRef.current;
     if (!video || !canvas || !hiddenCanvas || isExporting) return;
+    if (isDrawingRef.current) return;
     
     if (video.videoWidth > 0 && video.videoHeight > 0) {
-      // 1. Setup hidden canvas to full video size
-      if (hiddenCanvas.width !== video.videoWidth || hiddenCanvas.height !== video.videoHeight) {
-        hiddenCanvas.width = video.videoWidth;
-        hiddenCanvas.height = video.videoHeight;
-      }
-      
-      const hiddenCtx = hiddenCanvas.getContext('2d', { willReadFrequently: true });
-      if (!hiddenCtx) return;
+      isDrawingRef.current = true;
+      try {
+        // 1. Setup hidden canvas to full video size
+        if (hiddenCanvas.width !== video.videoWidth || hiddenCanvas.height !== video.videoHeight) {
+          hiddenCanvas.width = video.videoWidth;
+          hiddenCanvas.height = video.videoHeight;
+        }
+        
+        const hiddenCtx = hiddenCanvas.getContext('2d', { willReadFrequently: true });
+        if (!hiddenCtx) return;
 
-      // 2. Draw full video to hidden canvas
-      hiddenCtx.clearRect(0, 0, hiddenCanvas.width, hiddenCanvas.height);
-      hiddenCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
-      
-      // 3. Apply Chroma Key to the FULL uncropped image (so edge detection/contiguous fill works perfectly)
-      if (!isPicking && !showOriginal) {
-        applyChromaKey(hiddenCtx, hiddenCanvas, targetColors, similarity, colorBlend, edgeShift, edgeSoftness, shadingTolerance, contiguous, spillSuppression, strokeWidth, strokeColor);
-      }
+        // 2. Draw full video to hidden canvas
+        hiddenCtx.clearRect(0, 0, hiddenCanvas.width, hiddenCanvas.height);
+        hiddenCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
+        
+        // 3. Apply Extraction (AI Auto-Matte or Chroma Key)
+        if (!isPicking && !showOriginal) {
+          if (extractionMode === 'ai') {
+            await applyAiMatting(hiddenCtx, hiddenCanvas, {
+              threshold: aiThreshold,
+              edgeShift: aiEdgeShift,
+              smoothness: aiSmoothness,
+              feather: aiFeather,
+              defringe: aiDefringe,
+              invert: aiInvert,
+              strokeWidth,
+              strokeColor,
+              showVectorContour,
+              vectorContourColor,
+              customZones,
+              originalSource: video
+            });
+          } else {
+            applyChromaKey(
+              hiddenCtx,
+              hiddenCanvas,
+              targetColors,
+              similarity,
+              colorBlend,
+              edgeShift,
+              edgeSoftness,
+              shadingTolerance,
+              contiguous,
+              spillSuppression,
+              strokeWidth,
+              strokeColor
+            );
+            if (customZones.length > 0) {
+              applyCustomMatteZones(hiddenCtx, video, customZones, hiddenCanvas.width, hiddenCanvas.height);
+            }
+          }
+        }
 
-      // 4. Calculate crop dimensions
-      const dims = getCropDimensions(video.videoWidth, video.videoHeight, aspectRatio);
-      if (canvas.width !== Math.floor(dims.dw) || canvas.height !== Math.floor(dims.dh)) {
-        canvas.width = Math.floor(dims.dw);
-        canvas.height = Math.floor(dims.dh);
-      }
+        // 4. Calculate crop dimensions
+        const dims = getCropDimensions(video.videoWidth, video.videoHeight, aspectRatio);
+        if (canvas.width !== Math.floor(dims.dw) || canvas.height !== Math.floor(dims.dh)) {
+          canvas.width = Math.floor(dims.dw);
+          canvas.height = Math.floor(dims.dh);
+        }
 
-      // 5. Draw the CROPPED result from the hidden canvas to the visible canvas
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      if (ctx && canvas.width > 0 && canvas.height > 0) {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(hiddenCanvas, dims.sx, dims.sy, dims.sw, dims.sh, 0, 0, canvas.width, canvas.height);
+        // 5. Draw the CROPPED result from the hidden canvas to the visible canvas
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        if (ctx && canvas.width > 0 && canvas.height > 0) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.drawImage(hiddenCanvas, dims.sx, dims.sy, dims.sw, dims.sh, 0, 0, canvas.width, canvas.height);
+        }
+      } catch (err) {
+        console.error('Frame render error:', err);
+      } finally {
+        isDrawingRef.current = false;
       }
     }
-  }, [isExporting, targetColors, similarity, colorBlend, edgeShift, edgeSoftness, shadingTolerance, contiguous, spillSuppression, strokeWidth, strokeColor, isPicking, showOriginal, aspectRatio]);
+  }, [
+    isExporting,
+    extractionMode,
+    aiThreshold,
+    aiEdgeShift,
+    aiSmoothness,
+    aiFeather,
+    aiDefringe,
+    aiInvert,
+    showVectorContour,
+    vectorContourColor,
+    customZones,
+    targetColors,
+    similarity,
+    colorBlend,
+    edgeShift,
+    edgeSoftness,
+    shadingTolerance,
+    contiguous,
+    spillSuppression,
+    strokeWidth,
+    strokeColor,
+    isPicking,
+    showOriginal,
+    aspectRatio
+  ]);
 
   // Handle continuous playback loop
   useEffect(() => {
     let req: number;
-    const loop = () => {
-      if (isPlaying && !isExporting) {
-        drawFrame();
-        req = requestAnimationFrame(loop);
+    let active = true;
+    const loop = async () => {
+      if (active && isPlaying && !isExporting) {
+        await drawFrame();
+        if (active && isPlaying && !isExporting) {
+          req = requestAnimationFrame(loop);
+        }
       }
     };
     if (isPlaying) {
       req = requestAnimationFrame(loop);
     }
     return () => {
+      active = false;
       if (req) cancelAnimationFrame(req);
     };
   }, [isPlaying, isExporting, drawFrame]);
@@ -287,6 +411,61 @@ export default function App() {
     setIsPicking(false);
   };
 
+  const handleCanvasPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (isPicking || activeMatteTool === 'none') return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+    setDrawingStart({ x, y });
+    setDrawingCurrent({ x, y });
+  };
+
+  const handleCanvasPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!drawingStart || activeMatteTool === 'none') return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height));
+    setDrawingCurrent({ x, y });
+  };
+
+  const handleCanvasPointerUp = () => {
+    if (!drawingStart || !drawingCurrent || activeMatteTool === 'none') {
+      setDrawingStart(null);
+      setDrawingCurrent(null);
+      return;
+    }
+
+    const minX = Math.min(drawingStart.x, drawingCurrent.x);
+    const maxX = Math.max(drawingStart.x, drawingCurrent.x);
+    const minY = Math.min(drawingStart.y, drawingCurrent.y);
+    const maxY = Math.max(drawingStart.y, drawingCurrent.y);
+
+    if (maxX - minX > 0.008 && maxY - minY > 0.008) {
+      const newZone: CustomMatteZone = {
+        id: 'zone_' + Date.now(),
+        type: activeMatteTool === 'remove_rect' ? 'remove' : 'keep',
+        shape: 'rect',
+        points: [
+          { x: minX, y: minY },
+          { x: maxX, y: maxY }
+        ]
+      };
+      setCustomZones(prev => [...prev, newZone]);
+    }
+
+    setDrawingStart(null);
+    setDrawingCurrent(null);
+    setActiveMatteTool('none');
+  };
+
+  const removeCustomZone = (id: string) => {
+    setCustomZones(prev => prev.filter(z => z.id !== id));
+  };
+
   const exportWebMPromise = (fileName: string): Promise<void> => {
     return new Promise((resolve) => {
       const video = videoRef.current;
@@ -334,7 +513,7 @@ export default function App() {
       mediaRecorder.start();
       video.play();
       
-      const exportLoop = () => {
+      const exportLoop = async () => {
         if (video.currentTime >= video.duration || video.ended) {
           mediaRecorder.stop();
           video.pause();
@@ -353,7 +532,26 @@ export default function App() {
           if (hiddenCtx) {
             hiddenCtx.clearRect(0, 0, hiddenCanvas.width, hiddenCanvas.height);
             hiddenCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
-            applyChromaKey(hiddenCtx, hiddenCanvas, targetColors, similarity, colorBlend, edgeShift, edgeSoftness, shadingTolerance, contiguous, spillSuppression, strokeWidth, strokeColor);
+            
+            if (extractionMode === 'ai') {
+              await applyAiMatting(hiddenCtx, hiddenCanvas, {
+                threshold: aiThreshold,
+                edgeShift: aiEdgeShift,
+                smoothness: aiSmoothness,
+                feather: aiFeather,
+                defringe: aiDefringe,
+                invert: aiInvert,
+                strokeWidth,
+                strokeColor,
+                customZones,
+                originalSource: video
+              });
+            } else {
+              applyChromaKey(hiddenCtx, hiddenCanvas, targetColors, similarity, colorBlend, edgeShift, edgeSoftness, shadingTolerance, contiguous, spillSuppression, strokeWidth, strokeColor);
+              if (customZones.length > 0) {
+                applyCustomMatteZones(hiddenCtx, video, customZones, hiddenCanvas.width, hiddenCanvas.height);
+              }
+            }
             
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             ctx.drawImage(hiddenCanvas, dims.sx, dims.sy, dims.sw, dims.sh, 0, 0, canvas.width, canvas.height);
@@ -426,14 +624,33 @@ export default function App() {
         if (hiddenCtx) {
           hiddenCtx.clearRect(0, 0, hiddenCanvas.width, hiddenCanvas.height);
           hiddenCtx.drawImage(video, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
-          applyChromaKey(hiddenCtx, hiddenCanvas, targetColors, similarity, colorBlend, edgeShift, edgeSoftness, shadingTolerance, contiguous, spillSuppression, strokeWidth, strokeColor);
+          
+          if (extractionMode === 'ai') {
+            await applyAiMatting(hiddenCtx, hiddenCanvas, {
+              threshold: aiThreshold,
+              edgeShift: aiEdgeShift,
+              smoothness: aiSmoothness,
+              feather: aiFeather,
+              defringe: aiDefringe,
+              invert: aiInvert,
+              strokeWidth,
+              strokeColor,
+              customZones,
+              originalSource: video
+            });
+          } else {
+            applyChromaKey(hiddenCtx, hiddenCanvas, targetColors, similarity, colorBlend, edgeShift, edgeSoftness, shadingTolerance, contiguous, spillSuppression, strokeWidth, strokeColor);
+            if (customZones.length > 0) {
+              applyCustomMatteZones(hiddenCtx, video, customZones, hiddenCanvas.width, hiddenCanvas.height);
+            }
+          }
           
           ctx.clearRect(0, 0, canvas.width, canvas.height);
           ctx.drawImage(hiddenCanvas, dims.sx, dims.sy, dims.sw, dims.sh, 0, 0, canvas.width, canvas.height);
         }
         
         const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const hasKeyedColors = targetColors.length > 0;
+        const hasKeyedColors = extractionMode === 'ai' || targetColors.length > 0;
 
         let palette: number[][];
         let index: Uint8Array;
@@ -542,26 +759,67 @@ export default function App() {
   };
 
   return (
-    <div className="h-screen bg-[#0A0A0B] text-[#E0E0E0] font-sans flex flex-col overflow-hidden">
-      <header className="h-16 border-b border-[#222] flex items-center justify-between px-8 shrink-0">
-        <div className="flex items-center gap-4">
-          <span className="font-serif italic text-xl tracking-tight">Chroma.</span>
-          <div className="h-4 w-[1px] bg-[#333]"></div>
-          <span className="text-[10px] uppercase tracking-[0.2em] text-[#888] font-bold">Key Extraction / Studio</span>
+    <div className="h-screen w-screen bg-[#0A0A0B] text-[#E0E0E0] font-sans flex flex-col overflow-hidden select-none">
+      {/* Top Header */}
+      <header className="h-14 sm:h-16 border-b border-[#222] flex items-center justify-between px-4 sm:px-8 shrink-0 bg-[#0A0A0B] z-30">
+        <div className="flex items-center gap-3 sm:gap-4">
+          <span className="font-serif italic text-lg sm:text-xl tracking-tight text-white">Chroma.</span>
+          <div className="h-3.5 w-[1px] bg-[#333]"></div>
+          <span className="text-[9px] sm:text-[10px] uppercase tracking-[0.2em] text-[#888] font-bold">Studio</span>
         </div>
-        <div className="flex items-center gap-6">
+
+        {/* Mobile Navigation Tabs */}
+        <div className="flex sm:hidden items-center bg-[#141416] p-1 rounded-lg border border-[#26262a]">
+          <button
+            onClick={() => setMobileTab('view')}
+            className={`px-3 py-1 text-[10px] font-mono rounded transition-all ${
+              mobileTab === 'view' ? 'bg-white text-black font-bold shadow' : 'text-[#888]'
+            }`}
+          >
+            Video
+          </button>
+          <button
+            onClick={() => setMobileTab('tune')}
+            className={`px-3 py-1 text-[10px] font-mono rounded transition-all ${
+              mobileTab === 'tune' ? 'bg-emerald-400 text-black font-bold shadow' : 'text-[#888]'
+            }`}
+          >
+            Tuning
+          </button>
+          <button
+            onClick={() => setMobileTab('export')}
+            className={`px-3 py-1 text-[10px] font-mono rounded transition-all ${
+              mobileTab === 'export' ? 'bg-white text-black font-bold shadow' : 'text-[#888]'
+            }`}
+          >
+            Export
+          </button>
+        </div>
+
+        <div className="flex items-center gap-3 sm:gap-6">
           {videoSrc && (
-            <span className="text-[11px] uppercase tracking-widest text-[#666]">
-              {isPlaying ? 'PLAYING' : 'PAUSED'}
+            <span className="text-[10px] sm:text-[11px] uppercase tracking-widest text-[#666] font-mono">
+              {isPlaying ? 'PLAY' : 'PAUSE'}
             </span>
           )}
+          {/* Desktop Toggle Sidebar button */}
+          <button
+            onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+            className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 text-[10px] uppercase tracking-wider font-mono bg-[#141416] hover:bg-[#202024] border border-[#28282e] rounded text-[#aaa] hover:text-white transition-all"
+            title={isSidebarOpen ? 'Thu gọn thanh điều khiển để mở rộng view' : 'Mở thanh điều khiển'}
+          >
+            <Sliders className="w-3.5 h-3.5" />
+            <span>{isSidebarOpen ? 'Max View' : 'Panel'}</span>
+          </button>
         </div>
       </header>
 
-      <main className="flex-1 flex overflow-hidden">
-        {/* Main Preview Area */}
+      <main className="flex-1 flex flex-col sm:flex-row overflow-hidden relative">
+        {/* Main Preview Area - Highly Optimized viewport */}
         <section 
-          className="flex-1 bg-[#050505] relative flex items-center justify-center p-12 overflow-hidden"
+          className={`flex-1 bg-[#050505] relative flex items-center justify-center p-2 sm:p-6 md:p-8 overflow-hidden transition-all duration-300 ${
+            mobileTab !== 'view' ? 'hidden sm:flex' : 'flex'
+          }`}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
@@ -607,45 +865,154 @@ export default function App() {
 
               {/* Canvas Container */}
               <div 
-                className={`relative w-full h-full border border-[#222] shadow-2xl flex items-center justify-center overflow-hidden transition-all ${isPicking ? 'cursor-crosshair ring-1 ring-white' : ''}`}
+                className={`relative w-full h-full border border-[#222] shadow-2xl flex items-center justify-center overflow-hidden transition-all ${isPicking ? 'cursor-crosshair ring-1 ring-white' : activeMatteTool !== 'none' ? 'cursor-crosshair ring-1 ring-emerald-400' : ''}`}
                 style={
                   bgMode === 'black' ? { backgroundColor: '#000000' } :
                   bgMode === 'white' ? { backgroundColor: '#FFFFFF' } :
                   bgMode === 'custom' ? { backgroundColor: customBgColor } :
                   { backgroundImage: 'conic-gradient(#111 0.25turn, #181818 0.25turn 0.5turn, #111 0.5turn 0.75turn, #181818 0.75turn)', backgroundSize: '40px 40px' }
                 }
+                onPointerDown={handleCanvasPointerDown}
+                onPointerMove={handleCanvasPointerMove}
+                onPointerUp={handleCanvasPointerUp}
               >
                 <canvas 
                   ref={canvasRef}
                   onClick={handleCanvasClick}
-                  className="max-w-full max-h-full object-contain"
+                  className="max-w-full max-h-full object-contain pointer-events-auto select-none"
                 />
 
+                {/* Drawing & Custom Zones Overlay Layer */}
+                <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                  <div className="relative w-full h-full max-w-full max-h-full">
+                    {/* Render live drawing box */}
+                    {drawingStart && drawingCurrent && (
+                      <div 
+                        className={`absolute border-2 ${activeMatteTool === 'remove_rect' ? 'border-red-500 bg-red-500/20' : 'border-emerald-400 bg-emerald-400/20'} rounded-sm z-30 transition-none`}
+                        style={{
+                          left: `${Math.min(drawingStart.x, drawingCurrent.x) * 100}%`,
+                          top: `${Math.min(drawingStart.y, drawingCurrent.y) * 100}%`,
+                          width: `${Math.abs(drawingCurrent.x - drawingStart.x) * 100}%`,
+                          height: `${Math.abs(drawingCurrent.y - drawingStart.y) * 100}%`
+                        }}
+                      >
+                        <span className={`absolute -top-5 left-0 px-1.5 py-0.5 text-[8px] font-mono uppercase tracking-widest text-white rounded ${activeMatteTool === 'remove_rect' ? 'bg-red-600' : 'bg-emerald-600'}`}>
+                          {activeMatteTool === 'remove_rect' ? 'Ép Xóa (Garbage)' : 'Ép Giữ (Holdout)'}
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Active Zones Indicators when drawing or managing */}
+                    {activeMatteTool !== 'none' && customZones.map((zone) => {
+                      if (zone.shape === 'rect' && zone.points.length >= 2) {
+                        const minX = Math.min(zone.points[0].x, zone.points[1].x) * 100;
+                        const minY = Math.min(zone.points[0].y, zone.points[1].y) * 100;
+                        const width = Math.abs(zone.points[1].x - zone.points[0].x) * 100;
+                        const height = Math.abs(zone.points[1].y - zone.points[0].y) * 100;
+                        return (
+                          <div 
+                            key={zone.id}
+                            className={`absolute border border-dashed ${zone.type === 'remove' ? 'border-red-400/70 bg-red-500/10' : 'border-emerald-400/70 bg-emerald-500/10'} rounded-sm z-20`}
+                            style={{ left: `${minX}%`, top: `${minY}%`, width: `${width}%`, height: `${height}%` }}
+                          >
+                            <span className={`text-[7px] font-mono px-1 py-0.2 rounded absolute -top-3 left-0 ${zone.type === 'remove' ? 'bg-red-900/80 text-red-200' : 'bg-emerald-900/80 text-emerald-200'}`}>
+                              {zone.type === 'remove' ? 'Cut Zone' : 'Keep Zone'}
+                            </span>
+                          </div>
+                        );
+                      }
+                      return null;
+                    })}
+                  </div>
+                </div>
+
+                {/* Top Center Quick Matte Toolbar - Responsive */}
+                <div className="absolute top-3 sm:top-6 left-1/2 -translate-x-1/2 z-20 flex flex-wrap max-w-[95%] items-center justify-center gap-1 sm:gap-1.5 bg-black/80 backdrop-blur-md border border-white/10 px-2 sm:px-3 py-1 sm:py-1.5 rounded-full shadow-2xl">
+                  {/* Vector Contour Glow Toggle */}
+                  <button 
+                    onClick={(e) => { e.stopPropagation(); setShowVectorContour(!showVectorContour); }}
+                    className={`flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1 text-[8px] sm:text-[9px] uppercase tracking-wider font-mono rounded-full transition-all ${showVectorContour ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-400/50 shadow-[0_0_12px_rgba(6,182,212,0.4)]' : 'text-[#888] hover:text-white bg-[#1a1a1a] hover:bg-[#252525] border border-transparent'}`}
+                    title="Hiển thị đường viền vector contour phát sáng (Zero lag)"
+                  >
+                    <Activity className={`w-3 h-3 ${showVectorContour ? 'animate-pulse text-cyan-400' : ''}`} />
+                    <span className="hidden xs:inline">Vector</span> Glow
+                  </button>
+
+                  <div className="w-[1px] h-3 bg-white/20 mx-0.5 sm:mx-1" />
+
+                  {/* Garbage Matte (Cut) */}
+                  <button 
+                    onClick={(e) => { 
+                      e.stopPropagation(); 
+                      setActiveMatteTool(activeMatteTool === 'remove_rect' ? 'none' : 'remove_rect'); 
+                    }}
+                    className={`flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1 text-[8px] sm:text-[9px] uppercase tracking-wider font-mono rounded-full transition-all ${activeMatteTool === 'remove_rect' ? 'bg-red-500 text-white shadow-[0_0_12px_rgba(239,68,68,0.6)] font-bold' : 'text-red-400 hover:text-red-300 bg-red-950/30 hover:bg-red-900/40 border border-red-500/30'}`}
+                    title="Vẽ vùng hình chữ nhật để ép xóa triệt để (Garbage Matte)"
+                  >
+                    <ShieldAlert className="w-3 h-3" />
+                    <span>+ Xóa</span>
+                  </button>
+
+                  {/* Holdout Matte (Keep) */}
+                  <button 
+                    onClick={(e) => { 
+                      e.stopPropagation(); 
+                      setActiveMatteTool(activeMatteTool === 'keep_rect' ? 'none' : 'keep_rect'); 
+                    }}
+                    className={`flex items-center gap-1 sm:gap-1.5 px-2 sm:px-2.5 py-1 text-[8px] sm:text-[9px] uppercase tracking-wider font-mono rounded-full transition-all ${activeMatteTool === 'keep_rect' ? 'bg-emerald-500 text-white shadow-[0_0_12px_rgba(16,185,129,0.6)] font-bold' : 'text-emerald-400 hover:text-emerald-300 bg-emerald-950/30 hover:bg-emerald-900/40 border border-emerald-500/30'}`}
+                    title="Vẽ vùng hình chữ nhật để ép giữ lại không bị lẹm/xâm lấn (Holdout Matte)"
+                  >
+                    <ShieldCheck className="w-3 h-3" />
+                    <span>+ Giữ</span>
+                  </button>
+
+                  {customZones.length > 0 && (
+                    <span className="ml-0.5 sm:ml-1 px-1.5 py-0.5 text-[8px] font-mono text-white/70 bg-white/10 rounded-full">
+                      {customZones.length}
+                    </span>
+                  )}
+                </div>
+
+                {/* Drawing Helper Prompt */}
+                {activeMatteTool !== 'none' && (
+                  <div className="absolute bottom-16 sm:bottom-6 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 sm:gap-3 bg-black/90 backdrop-blur-md border border-emerald-500/40 px-3 sm:px-4 py-1.5 sm:py-2 rounded-full shadow-2xl animate-fade-in max-w-[90%] text-center">
+                    <span className="text-[9px] sm:text-[10px] text-white">
+                      👉 <b>Kéo thả</b> trên video để tạo vùng {activeMatteTool === 'remove_rect' ? 'Ép Xóa' : 'Ép Giữ'}
+                    </span>
+                    <button 
+                      onClick={() => setActiveMatteTool('none')}
+                      className="px-2 py-0.5 text-[8px] sm:text-[9px] font-mono uppercase bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors shrink-0"
+                    >
+                      Hủy
+                    </button>
+                  </div>
+                )}
+
                 {/* Top Left BG Controls Overlay */}
-                <div className="absolute top-6 left-6 z-20 flex items-center gap-3 bg-black/60 backdrop-blur-md border border-white/10 px-4 py-2 rounded-full">
-                  <span className="text-[9px] uppercase tracking-widest text-[#888]">BG:</span>
-                  <div className="flex gap-2">
+                <div className="absolute top-3 sm:top-6 left-3 sm:left-6 z-20 flex items-center gap-2 sm:gap-3 bg-black/60 backdrop-blur-md border border-white/10 px-2.5 sm:px-4 py-1.5 sm:py-2 rounded-full">
+                  <span className="text-[8px] sm:text-[9px] uppercase tracking-widest text-[#888]">BG:</span>
+                  <div className="flex gap-1.5 sm:gap-2">
                     <button 
                       onClick={(e) => { e.stopPropagation(); setBgMode('transparent'); }} 
-                      className={`w-4 h-4 rounded-full overflow-hidden border ${bgMode === 'transparent' ? 'border-white scale-110 shadow-[0_0_10px_rgba(255,255,255,0.5)]' : 'border-transparent opacity-50 hover:opacity-100'} transition-all`}
+                      className={`w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-full overflow-hidden border ${bgMode === 'transparent' ? 'border-white scale-110 shadow-[0_0_10px_rgba(255,255,255,0.5)]' : 'border-transparent opacity-50 hover:opacity-100'} transition-all`}
                       title="Transparent (Checkerboard)"
                     >
                       <div className="w-full h-full" style={{ backgroundImage: 'conic-gradient(#555 0.25turn, #888 0.25turn 0.5turn, #555 0.5turn 0.75turn, #888 0.75turn)', backgroundSize: '6px 6px' }}></div>
                     </button>
                     <button 
                       onClick={(e) => { e.stopPropagation(); setBgMode('black'); }} 
-                      className={`w-4 h-4 rounded-full bg-black border ${bgMode === 'black' ? 'border-white scale-110 shadow-[0_0_10px_rgba(255,255,255,0.5)]' : 'border-[#444] opacity-50 hover:opacity-100'} transition-all`}
+                      className={`w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-full bg-black border ${bgMode === 'black' ? 'border-white scale-110 shadow-[0_0_10px_rgba(255,255,255,0.5)]' : 'border-[#444] opacity-50 hover:opacity-100'} transition-all`}
                       title="Solid Black"
                     />
                     <button 
                       onClick={(e) => { e.stopPropagation(); setBgMode('white'); }} 
-                      className={`w-4 h-4 rounded-full bg-white border ${bgMode === 'white' ? 'border-[#10B981] ring-1 ring-[#10B981] scale-110 shadow-[0_0_10px_rgba(16,185,129,0.5)]' : 'border-transparent opacity-50 hover:opacity-100'} transition-all`}
+                      className={`w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-full bg-white border ${bgMode === 'white' ? 'border-[#10B981] ring-1 ring-[#10B981] scale-110 shadow-[0_0_10px_rgba(16,185,129,0.5)]' : 'border-transparent opacity-50 hover:opacity-100'} transition-all`}
                       title="Solid White"
                     />
                     <div className="relative flex items-center">
                       <button 
                         onClick={(e) => { e.stopPropagation(); setBgMode('custom'); }} 
-                        className={`w-4 h-4 rounded-full border ${bgMode === 'custom' ? 'border-white scale-110 shadow-[0_0_10px_rgba(255,255,255,0.5)]' : 'border-[#444] opacity-50 hover:opacity-100'} transition-all`}
+                        className={`w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-full border ${bgMode === 'custom' ? 'border-white scale-110 shadow-[0_0_10px_rgba(255,255,255,0.5)]' : 'border-[#444] opacity-50 hover:opacity-100'} transition-all`}
                         style={{ backgroundColor: customBgColor }}
                         title="Custom Color Matte"
                       />
@@ -664,11 +1031,11 @@ export default function App() {
                 </div>
 
                 {/* Top Controls Overlay */}
-                <div className="absolute top-6 right-6 z-20 flex gap-3">
+                <div className="absolute top-3 sm:top-6 right-3 sm:right-6 z-20 flex gap-1.5 sm:gap-3">
                   {videoQueue.length > 1 && !isBatchExporting && (
-                    <div className="flex bg-black/60 backdrop-blur-md border border-white/10 rounded-full px-2 items-center">
+                    <div className="hidden md:flex bg-black/60 backdrop-blur-md border border-white/10 rounded-full px-2 items-center">
                       <span className="text-[9px] uppercase text-[#888] tracking-widest mx-2">Queue:</span>
-                      <div className="flex gap-1 overflow-x-auto custom-scrollbar max-w-[200px] py-1">
+                      <div className="flex gap-1 overflow-x-auto custom-scrollbar max-w-[140px] lg:max-w-[200px] py-1">
                         {videoQueue.map((v, i) => (
                            <button 
                               key={i}
@@ -698,15 +1065,15 @@ export default function App() {
                     onMouseLeave={() => setShowOriginal(false)}
                     onTouchStart={() => setShowOriginal(true)}
                     onTouchEnd={() => setShowOriginal(false)}
-                    className="flex items-center gap-2 bg-black/60 backdrop-blur-md border border-white/10 px-3 py-1.5 text-[9px] uppercase tracking-widest text-[#888] hover:text-white hover:border-white/30 transition-colors rounded-full"
+                    className="flex items-center gap-1.5 bg-black/60 backdrop-blur-md border border-white/10 px-2.5 sm:px-3 py-1 sm:py-1.5 text-[8px] sm:text-[9px] uppercase tracking-widest text-[#888] hover:text-white hover:border-white/30 transition-colors rounded-full"
                   >
                     <Eye className="w-3 h-3" />
-                    Hold Original
+                    <span className="hidden xs:inline">Original</span>
                   </button>
 
-                  <label className="flex items-center gap-2 bg-black/60 backdrop-blur-md border border-white/10 px-3 py-1.5 text-[9px] uppercase tracking-widest text-[#888] hover:text-white hover:border-white/30 transition-colors rounded-full cursor-pointer">
+                  <label className="flex items-center gap-1.5 bg-black/60 backdrop-blur-md border border-white/10 px-2.5 sm:px-3 py-1 sm:py-1.5 text-[8px] sm:text-[9px] uppercase tracking-widest text-[#888] hover:text-white hover:border-white/30 transition-colors rounded-full cursor-pointer">
                     <Upload className="w-3 h-3" />
-                    {videoQueue.length > 0 ? 'Replace Videos' : 'New Video'}
+                    <span className="hidden xs:inline">{videoQueue.length > 0 ? 'Replace' : 'Upload'}</span>
                     <input type="file" accept="video/*" multiple className="hidden" onClick={(e) => { (e.target as HTMLInputElement).value = '' }} onChange={handleFileUpload} />
                   </label>
                 </div>
@@ -742,18 +1109,18 @@ export default function App() {
                   </div>
                 )}
 
-                <div className="absolute bottom-6 left-6 flex items-center gap-3 bg-black/80 px-3 py-2 border border-white/10 backdrop-blur-md">
-                  <div className={`w-2 h-2 rounded-full ${isPlaying ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
-                  <span className="text-[10px] font-mono tracking-tighter">
-                    {showOriginal || isPicking ? 'ORIGINAL SOURCE' : 'LIVE PREVIEW'}
+                <div className="absolute bottom-3 sm:bottom-6 left-3 sm:left-6 flex items-center gap-2 sm:gap-3 bg-black/80 px-2.5 sm:px-3 py-1 sm:py-2 border border-white/10 backdrop-blur-md rounded-md">
+                  <div className={`w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full ${isPlaying ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
+                  <span className="text-[8px] sm:text-[10px] font-mono tracking-tighter">
+                    {showOriginal || isPicking ? 'ORIGINAL' : 'PREVIEW'}
                   </span>
                 </div>
               </div>
 
-              {/* Playback Controls Footer (Floating) */}
-              <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-4 bg-[#0A0A0B]/90 backdrop-blur-md border border-[#333] px-6 py-3 transition-all z-20 w-[90%] max-w-2xl rounded-full shadow-2xl">
-                 <button onClick={togglePlay} className="text-[#888] hover:text-white transition-colors flex-shrink-0">
-                    {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+              {/* Playback Controls Footer (Floating) - Responsive */}
+              <div className="absolute bottom-3 sm:bottom-6 left-1/2 -translate-x-1/2 flex items-center gap-2 sm:gap-4 bg-[#0A0A0B]/95 backdrop-blur-md border border-[#333] px-3 sm:px-6 py-2 sm:py-3 transition-all z-20 w-[95%] sm:w-[90%] max-w-2xl rounded-full shadow-2xl">
+                 <button onClick={togglePlay} className="text-[#888] hover:text-white transition-colors flex-shrink-0 p-1">
+                    {isPlaying ? <Pause className="w-3.5 h-3.5 sm:w-4 sm:h-4" /> : <Play className="w-3.5 h-3.5 sm:w-4 sm:h-4" />}
                  </button>
                  
                  <input 
@@ -774,9 +1141,9 @@ export default function App() {
                     className="flex-1 h-[2px] bg-[#222] appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
                  />
                  
-                 <span className="text-[10px] font-mono tracking-widest text-[#666] w-24 flex flex-col items-end justify-center flex-shrink-0">
+                 <span className="text-[9px] sm:text-[10px] font-mono tracking-widest text-[#666] w-16 sm:w-24 flex flex-col items-end justify-center flex-shrink-0">
                     <span className="text-white">{formatTime(currentTime)}</span>
-                    <span className="text-[8px] opacity-60">{Math.floor(currentTime * 30)} F</span>
+                    <span className="text-[7px] sm:text-[8px] opacity-60 hidden xs:inline">{Math.floor(currentTime * 30)} F</span>
                  </span>
               </div>
             </div>
@@ -794,191 +1161,192 @@ export default function App() {
           )}
         </section>
 
-        {/* Right Sidebar Controls */}
-        <aside className="w-[320px] border-l border-[#222] bg-[#0A0A0B] flex flex-col shrink-0 overflow-y-auto">
-          <div className="p-8 border-b border-[#222]">
-              <div className="flex justify-between items-end mb-8">
+        {/* Right Sidebar Controls - Responsive & Collapsible */}
+        <aside className={`w-full sm:w-[340px] md:w-[360px] border-l border-[#222] bg-[#0A0A0B] flex flex-col shrink-0 overflow-y-auto custom-scrollbar transition-all duration-300 ${
+          mobileTab === 'view' ? 'hidden sm:flex' : 'flex'
+        } ${!isSidebarOpen ? 'sm:hidden' : 'sm:flex'}`}>
+          <div className={`p-5 sm:p-8 border-b border-[#222] ${mobileTab === 'export' ? 'hidden sm:block' : 'block'}`}>
+              <div className="flex justify-between items-end mb-6">
                 <div>
                   <h2 className="font-serif italic text-2xl mb-1 text-white">Extraction</h2>
-                  <p className="text-[11px] text-[#666] uppercase tracking-widest">Parameters</p>
+                  <p className="text-[11px] text-[#666] uppercase tracking-widest">Engine & Parameters</p>
                 </div>
                 <button
                   onClick={() => {
-                    setTargetColors([]);
-                    setSimilarity(40);
-                    setColorBlend(20);
-                    setShadingTolerance(50);
-                    setContiguous(true);
-                    setSpillSuppression(50);
-                    setStrokeWidth(0);
-                    setStrokeColor('#ffffff');
-                    setEdgeShift(0);
-                    setEdgeSoftness(0);
+                    if (extractionMode === 'ai') {
+                      setAiThreshold(50);
+                      setAiEdgeShift(-1.5);
+                      setAiSmoothness(2.0);
+                      setAiFeather(1.0);
+                      setAiDefringe(40);
+                      setAiInvert(false);
+                      setStrokeWidth(0);
+                      setStrokeColor('#ffffff');
+                    } else {
+                      setTargetColors([]);
+                      setSimilarity(40);
+                      setColorBlend(20);
+                      setShadingTolerance(50);
+                      setContiguous(true);
+                      setSpillSuppression(50);
+                      setStrokeWidth(0);
+                      setStrokeColor('#ffffff');
+                      setEdgeShift(0);
+                      setEdgeSoftness(0);
+                    }
                   }}
                   className="text-[9px] uppercase tracking-widest text-[#666] hover:text-white transition-colors underline decoration-[#333] underline-offset-4"
                 >
                   Reset
                 </button>
               </div>
+
+              {/* Extraction Mode Segmented Switch */}
+              <div className="grid grid-cols-2 gap-1 p-1 bg-[#121215] border border-[#222] rounded-lg mb-8">
+                <button
+                  onClick={() => setExtractionMode('chroma')}
+                  className={`py-2 px-3 text-[10px] font-mono tracking-wider rounded-md flex items-center justify-center gap-1.5 transition-all ${
+                    extractionMode === 'chroma'
+                      ? 'bg-white text-black font-semibold shadow-md'
+                      : 'text-[#888] hover:text-white'
+                  }`}
+                >
+                  <Pipette className="w-3 h-3" />
+                  CHROMA KEY
+                </button>
+                <button
+                  onClick={() => setExtractionMode('ai')}
+                  className={`py-2 px-3 text-[10px] font-mono tracking-wider rounded-md flex items-center justify-center gap-1.5 transition-all ${
+                    extractionMode === 'ai'
+                      ? 'bg-gradient-to-r from-emerald-400 to-teal-300 text-black font-semibold shadow-md'
+                      : 'text-[#888] hover:text-white'
+                  }`}
+                >
+                  <Sparkles className="w-3 h-3" />
+                  AI MATTE
+                </button>
+              </div>
               
               <div className="space-y-8">
-              {/* Target Colors */}
-              <div>
-                <div className="flex justify-between items-center mb-4">
-                  <label className="text-[9px] uppercase tracking-[0.2em] text-[#888] block">Primary Key Color</label>
-                  <span className="text-[9px] font-mono text-[#666]">{targetColors.length}/10</span>
-                </div>
-                
-                <div className="flex flex-wrap items-center gap-3">
-                  {targetColors.map((color, idx) => (
-                    <div 
-                      key={idx} 
-                      className="group relative w-10 h-10 rounded-full border border-white shadow-[0_0_15px_rgba(255,255,255,0.1)] cursor-pointer overflow-hidden transition-all"
-                      style={{ backgroundColor: `rgb(${color.r}, ${color.g}, ${color.b})` }}
-                      onClick={() => removeColor(idx)}
-                      title="Click to remove"
-                    >
-                      <div className="absolute inset-0 bg-red-500/80 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                        <Trash2 className="w-4 h-4 text-white" />
-                      </div>
-                    </div>
-                  ))}
-                  
-                  {targetColors.length < 10 && videoSrc && (
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => setIsPicking(!isPicking)}
-                        className={`w-10 h-10 rounded-full border border-[#333] flex items-center justify-center transition-colors ${
-                          isPicking ? 'bg-white text-black' : 'text-[#888] hover:bg-white hover:text-black'
-                        }`}
-                        title="Pick color from video"
-                      >
-                        <Pipette className="w-4 h-4" />
-                      </button>
-                      
-                      <div className="relative w-10 h-10 rounded-full border border-[#333] flex items-center justify-center text-[#888] hover:bg-white hover:text-black transition-colors cursor-pointer" title="Add hex color manually">
-                        <span className="text-xl font-light mb-1">+</span>
-                        <input 
-                          type="color" 
-                          onChange={(e) => {
-                            const hex = e.target.value.replace('#', '');
-                            const r = parseInt(hex.substring(0, 2), 16);
-                            const g = parseInt(hex.substring(2, 4), 16);
-                            const b = parseInt(hex.substring(4, 6), 16);
-                            const newColor = { r, g, b };
-                            
-                            const isDuplicate = targetColors.some(c => 
-                              Math.abs(c.r - newColor.r) < 5 && 
-                              Math.abs(c.g - newColor.g) < 5 && 
-                              Math.abs(c.b - newColor.b) < 5
-                            );
-                            
-                            if (!isDuplicate) {
-                              setTargetColors(prev => [...prev, newColor]);
-                            }
-                          }}
-                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                        />
-                      </div>
-                    </div>
-                  )}
-                </div>
-                
-                {targetColors.length === 0 && videoSrc && (
-                  <p className="text-[9px] text-[#555] italic mt-4 font-serif">Click the pipette to sample colors. Tip: Pick the shadow as a 2nd color.</p>
-                )}
-                {targetColors.length > 0 && videoSrc && contiguous && (
-                  <p className="text-[9px] text-[#555] italic mt-4 font-serif">Tip: If "Contiguous" is missing enclosed gaps (like between arms), pick a color inside that gap to force its removal.</p>
-                )}
-              </div>
-
-              {/* Adjustments */}
-              {videoSrc && (
+              {extractionMode === 'ai' ? (
+                /* AI Auto-Matte Controls */
                 <div className="space-y-6">
-                  <h3 className="text-[9px] uppercase tracking-widest text-[#555] border-b border-[#222] pb-2">Matte Generation</h3>
-                  
-                  <div className="group">
-                    <div className="flex justify-between text-[10px] uppercase tracking-widest mb-3">
-                      <span className="text-[#888]">Similarity</span>
-                      <span className="font-mono text-white">{similarity}%</span>
+                  {/* AI Status Banner */}
+                  <div className="p-3 bg-[#161618] border border-[#26262a] rounded-md">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[9px] uppercase tracking-widest text-[#888] flex items-center gap-1.5">
+                        <Wand2 className="w-3 h-3 text-emerald-400" />
+                        Neural Model
+                      </span>
+                      <span className="text-[9px] font-mono uppercase px-1.5 py-0.5 rounded bg-[#222] text-[#aaa]">
+                        Client GPU
+                      </span>
                     </div>
-                    <input 
-                      type="range" min="0" max="100" value={similarity} 
-                      onChange={(e) => setSimilarity(Number(e.target.value))}
-                      className="w-full h-[2px] bg-[#222] appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
-                    />
-                  </div>
-                  
-                  <div className="group">
-                    <div className="flex justify-between text-[10px] uppercase tracking-widest mb-3">
-                      <span className="text-[#888]">Color Blend</span>
-                      <span className="font-mono text-white">{colorBlend}%</span>
-                    </div>
-                    <input 
-                      type="range" min="0" max="100" value={colorBlend} 
-                      onChange={(e) => setColorBlend(Number(e.target.value))}
-                      className="w-full h-[2px] bg-[#222] appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
-                    />
-                  </div>
-                  
-                  <div className="group">
-                    <div className="flex justify-between text-[10px] uppercase tracking-widest mb-3">
-                      <span className="text-[#888]">Shading Tolerance</span>
-                      <span className="font-mono text-white">{shadingTolerance}%</span>
-                    </div>
-                    <input 
-                      type="range" min="0" max="100" value={shadingTolerance} 
-                      onChange={(e) => setShadingTolerance(Number(e.target.value))}
-                      className="w-full h-[2px] bg-[#222] appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
-                    />
+
+                    {aiStatus === 'loading' && (
+                      <div className="flex items-center gap-2 text-yellow-400 text-[10px] font-mono mt-2">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Loading AI model (~2MB)...</span>
+                      </div>
+                    )}
+                    {aiStatus === 'ready' && (
+                      <div className="flex items-center gap-2 text-emerald-400 text-[10px] font-mono mt-2">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>Ready (WebGPU / WASM Active)</span>
+                      </div>
+                    )}
+                    {aiStatus === 'error' && (
+                      <div className="flex items-center gap-2 text-red-400 text-[10px] font-mono mt-2">
+                        <AlertCircle className="w-3.5 h-3.5" />
+                        <span>{aiError || 'Failed to initialize AI model'}</span>
+                      </div>
+                    )}
+                    {aiStatus === 'idle' && (
+                      <p className="text-[10px] text-[#777] font-mono mt-1">Initializing segmentation engine...</p>
+                    )}
                   </div>
 
-                  <div className="group flex items-center justify-between mb-4">
-                    <span className="text-[10px] uppercase tracking-widest text-[#888]">Contiguous (Protect Subject)</span>
-                    <button 
-                      onClick={() => setContiguous(!contiguous)}
-                      className={`w-8 h-4 rounded-full relative transition-colors ${contiguous ? 'bg-[#1DB954]' : 'bg-[#333]'}`}
-                    >
-                      <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${contiguous ? 'left-[18px]' : 'left-0.5'}`} />
-                    </button>
-                  </div>
+                  <h3 className="text-[9px] uppercase tracking-widest text-[#555] border-b border-[#222] pb-2">AI Matte Tuning</h3>
 
-                  <h3 className="text-[9px] uppercase tracking-widest text-[#555] border-b border-[#222] pb-2 pt-2">Matte Cleanup</h3>
-
+                  {/* Edge Shift / Choke */}
                   <div className="group">
                     <div className="flex justify-between text-[10px] uppercase tracking-widest mb-3">
                       <span className="text-[#888]">Edge Shift (Choke)</span>
-                      <span className="font-mono text-white">{edgeShift > 0 ? '+' : ''}{edgeShift}%</span>
+                      <span className="font-mono text-emerald-400">{aiEdgeShift > 0 ? `+${aiEdgeShift}` : aiEdgeShift}px</span>
                     </div>
                     <input 
-                      type="range" min="-100" max="100" value={edgeShift} 
-                      onChange={(e) => setEdgeShift(Number(e.target.value))}
+                      type="range" min="-8" max="6" step="0.5" value={aiEdgeShift} 
+                      onChange={(e) => setAiEdgeShift(Number(e.target.value))}
+                      className="w-full h-[2px] bg-[#222] appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-emerald-400 [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
+                    />
+                    <span className="text-[8px] text-[#666] mt-1 block">Kéo âm (-1px đến -5px) để thu hẹp viền & xóa sạch bóng tối/viền đen.</span>
+                  </div>
+
+                  {/* Edge Anti-Aliasing (Smoothness) */}
+                  <div className="group">
+                    <div className="flex justify-between text-[10px] uppercase tracking-widest mb-3">
+                      <span className="text-[#888]">Anti-Aliasing (Khử gai)</span>
+                      <span className="font-mono text-emerald-400">{aiSmoothness}px</span>
+                    </div>
+                    <input 
+                      type="range" min="0" max="8" step="0.5" value={aiSmoothness} 
+                      onChange={(e) => setAiSmoothness(Number(e.target.value))}
+                      className="w-full h-[2px] bg-[#222] appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-emerald-400 [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
+                    />
+                    <span className="text-[8px] text-[#666] mt-1 block">Làm mượt đường răng cưa, loại bỏ gai và mép gợn sóng.</span>
+                  </div>
+
+                  {/* Dark Halo Defringe */}
+                  <div className="group">
+                    <div className="flex justify-between text-[10px] uppercase tracking-widest mb-3">
+                      <span className="text-[#888]">Defringe (Khử viền tối)</span>
+                      <span className="font-mono text-emerald-400">{aiDefringe}%</span>
+                    </div>
+                    <input 
+                      type="range" min="0" max="100" step="5" value={aiDefringe} 
+                      onChange={(e) => setAiDefringe(Number(e.target.value))}
+                      className="w-full h-[2px] bg-[#222] appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-emerald-400 [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
+                    />
+                    <span className="text-[8px] text-[#666] mt-1 block">Tự động tẩy sạch dải màu tối & bóng đen ám ở rìa viền.</span>
+                  </div>
+
+                  {/* Subject Confidence */}
+                  <div className="group">
+                    <div className="flex justify-between text-[10px] uppercase tracking-widest mb-3">
+                      <span className="text-[#888]">Subject Confidence</span>
+                      <span className="font-mono text-white">{aiThreshold}%</span>
+                    </div>
+                    <input 
+                      type="range" min="10" max="90" value={aiThreshold} 
+                      onChange={(e) => setAiThreshold(Number(e.target.value))}
                       className="w-full h-[2px] bg-[#222] appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
                     />
                   </div>
 
+                  {/* Edge Feather */}
                   <div className="group">
                     <div className="flex justify-between text-[10px] uppercase tracking-widest mb-3">
-                      <span className="text-[#888]">Edge Softness</span>
-                      <span className="font-mono text-white">{edgeSoftness}%</span>
+                      <span className="text-[#888]">Edge Feather (Làm mờ êm)</span>
+                      <span className="font-mono text-white">{aiFeather}px</span>
                     </div>
                     <input 
-                      type="range" min="0" max="100" value={edgeSoftness} 
-                      onChange={(e) => setEdgeSoftness(Number(e.target.value))}
+                      type="range" min="0" max="10" step="0.5" value={aiFeather} 
+                      onChange={(e) => setAiFeather(Number(e.target.value))}
                       className="w-full h-[2px] bg-[#222] appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
                     />
                   </div>
 
-                  <div className="group">
-                    <div className="flex justify-between text-[10px] uppercase tracking-widest mb-3">
-                      <span className="text-[#888]">Spill Suppression</span>
-                      <span className="font-mono text-white">{spillSuppression}%</span>
+                  <div className="group flex items-center justify-between py-2 border-y border-[#222]">
+                    <div>
+                      <span className="text-[10px] uppercase tracking-widest text-[#888] block">Invert Mask</span>
+                      <span className="text-[8px] text-[#555]">Keep background instead of subject</span>
                     </div>
-                    <input 
-                      type="range" min="0" max="100" value={spillSuppression} 
-                      onChange={(e) => setSpillSuppression(Number(e.target.value))}
-                      className="w-full h-[2px] bg-[#222] appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
-                    />
+                    <button 
+                      onClick={() => setAiInvert(!aiInvert)}
+                      className={`w-8 h-4 rounded-full relative transition-colors ${aiInvert ? 'bg-[#10B981]' : 'bg-[#333]'}`}
+                    >
+                      <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${aiInvert ? 'left-[18px]' : 'left-0.5'}`} />
+                    </button>
                   </div>
 
                   <h3 className="text-[9px] uppercase tracking-widest text-[#555] border-b border-[#222] pb-2 pt-2">Stroke / Outline</h3>
@@ -1010,12 +1378,297 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+
+                  <h3 className="text-[9px] uppercase tracking-widest text-[#555] border-b border-[#222] pb-2 pt-2 flex items-center justify-between">
+                    <span>Vector Contour & Zones</span>
+                    <span className="text-[8px] text-cyan-400 font-mono">Zero-Lag</span>
+                  </h3>
+
+                  {/* Vector Contour Glow Overlay */}
+                  <div className="group flex items-center justify-between py-1">
+                    <div>
+                      <span className="text-[10px] uppercase tracking-widest text-[#888] block">Vector Contour Glow</span>
+                      <span className="text-[8px] text-[#555]">Vẽ đường bao vector viền thời gian thực</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {showVectorContour && (
+                        <input 
+                          type="color" 
+                          value={vectorContourColor}
+                          onChange={(e) => setVectorContourColor(e.target.value)}
+                          className="w-4 h-4 p-0 border-0 outline-none cursor-pointer rounded-full overflow-hidden [&::-webkit-color-swatch-wrapper]:p-0 [&::-webkit-color-swatch]:border-0 [&::-webkit-color-swatch]:rounded-full"
+                          title="Chọn màu phát sáng vector"
+                        />
+                      )}
+                      <button 
+                        onClick={() => setShowVectorContour(!showVectorContour)}
+                        className={`w-8 h-4 rounded-full relative transition-colors ${showVectorContour ? 'bg-cyan-500' : 'bg-[#333]'}`}
+                      >
+                        <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${showVectorContour ? 'left-[18px]' : 'left-0.5'}`} />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Custom Matte Zones Manager */}
+                  <div className="pt-2 border-t border-[#222]">
+                    <div className="flex justify-between items-center mb-2">
+                      <span className="text-[10px] uppercase tracking-widest text-[#888]">Custom Matte Zones</span>
+                      <span className="text-[8px] font-mono text-[#666]">{customZones.length} vùng</span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 mb-2">
+                      <button 
+                        onClick={() => setActiveMatteTool(activeMatteTool === 'remove_rect' ? 'none' : 'remove_rect')}
+                        className={`px-2 py-1.5 text-[9px] font-mono rounded border flex items-center justify-center gap-1.5 transition-all ${activeMatteTool === 'remove_rect' ? 'bg-red-500 text-white border-red-400 font-bold shadow-[0_0_10px_rgba(239,68,68,0.5)]' : 'bg-red-950/30 text-red-400 border-red-900/50 hover:bg-red-900/40'}`}
+                      >
+                        <ShieldAlert className="w-3 h-3" />
+                        <span>+ Ép Xóa</span>
+                      </button>
+                      <button 
+                        onClick={() => setActiveMatteTool(activeMatteTool === 'keep_rect' ? 'none' : 'keep_rect')}
+                        className={`px-2 py-1.5 text-[9px] font-mono rounded border flex items-center justify-center gap-1.5 transition-all ${activeMatteTool === 'keep_rect' ? 'bg-emerald-500 text-white border-emerald-400 font-bold shadow-[0_0_10px_rgba(16,185,129,0.5)]' : 'bg-emerald-950/30 text-emerald-400 border-emerald-900/50 hover:bg-emerald-900/40'}`}
+                      >
+                        <ShieldCheck className="w-3 h-3" />
+                        <span>+ Ép Giữ</span>
+                      </button>
+                    </div>
+
+                    {/* Zones list */}
+                    {customZones.length > 0 && (
+                      <div className="space-y-1.5 max-h-32 overflow-y-auto custom-scrollbar pr-1 mt-2">
+                        {customZones.map((zone, idx) => (
+                          <div 
+                            key={zone.id}
+                            className="flex items-center justify-between px-2 py-1 bg-[#141416] border border-[#26262a] rounded text-[9px] font-mono"
+                          >
+                            <div className="flex items-center gap-1.5">
+                              <span className={`w-2 h-2 rounded-full ${zone.type === 'remove' ? 'bg-red-500 shadow-[0_0_6px_rgba(239,68,68,0.8)]' : 'bg-emerald-400 shadow-[0_0_6px_rgba(16,185,129,0.8)]'}`} />
+                              <span className={zone.type === 'remove' ? 'text-red-300' : 'text-emerald-300'}>
+                                {zone.type === 'remove' ? 'Ép Xóa (Garbage)' : 'Ép Giữ (Holdout)'} #{idx + 1}
+                              </span>
+                            </div>
+                            <button 
+                              onClick={() => removeCustomZone(zone.id)}
+                              className="text-[#666] hover:text-red-400 transition-colors p-1"
+                              title="Xóa vùng này"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </div>
+                        ))}
+                        <button 
+                          onClick={() => setCustomZones([])}
+                          className="w-full text-center text-[8px] uppercase tracking-widest text-red-400 hover:text-red-300 py-1 transition-colors"
+                        >
+                          Xóa tất cả vùng can thiệp
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <p className="text-[9px] text-[#555] italic font-serif leading-relaxed">
+                    Tip: Điều chỉnh <b>Edge Shift</b> về giá trị âm (-1px đến -4px) kết hợp <b>Anti-Aliasing</b> để loại bỏ hoàn toàn viền đen và gai viền.
+                  </p>
                 </div>
+              ) : (
+                /* Chroma Key Controls */
+                <>
+                {/* Target Colors */}
+                <div>
+                  <div className="flex justify-between items-center mb-4">
+                    <label className="text-[9px] uppercase tracking-[0.2em] text-[#888] block">Primary Key Color</label>
+                    <span className="text-[9px] font-mono text-[#666]">{targetColors.length}/10</span>
+                  </div>
+                  
+                  <div className="flex flex-wrap items-center gap-3">
+                    {targetColors.map((color, idx) => (
+                      <div 
+                        key={idx} 
+                        className="group relative w-10 h-10 rounded-full border border-white shadow-[0_0_15px_rgba(255,255,255,0.1)] cursor-pointer overflow-hidden transition-all"
+                        style={{ backgroundColor: `rgb(${color.r}, ${color.g}, ${color.b})` }}
+                        onClick={() => removeColor(idx)}
+                        title="Click to remove"
+                      >
+                        <div className="absolute inset-0 bg-red-500/80 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                          <Trash2 className="w-4 h-4 text-white" />
+                        </div>
+                      </div>
+                    ))}
+                    
+                    {targetColors.length < 10 && videoSrc && (
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => setIsPicking(!isPicking)}
+                          className={`w-10 h-10 rounded-full border border-[#333] flex items-center justify-center transition-colors ${
+                            isPicking ? 'bg-white text-black' : 'text-[#888] hover:bg-white hover:text-black'
+                          }`}
+                          title="Pick color from video"
+                        >
+                          <Pipette className="w-4 h-4" />
+                        </button>
+                        
+                        <div className="relative w-10 h-10 rounded-full border border-[#333] flex items-center justify-center text-[#888] hover:bg-white hover:text-black transition-colors cursor-pointer" title="Add hex color manually">
+                          <span className="text-xl font-light mb-1">+</span>
+                          <input 
+                            type="color" 
+                            onChange={(e) => {
+                              const hex = e.target.value.replace('#', '');
+                              const r = parseInt(hex.substring(0, 2), 16);
+                              const g = parseInt(hex.substring(2, 4), 16);
+                              const b = parseInt(hex.substring(4, 6), 16);
+                              const newColor = { r, g, b };
+                              
+                              const isDuplicate = targetColors.some(c => 
+                                Math.abs(c.r - newColor.r) < 5 && 
+                                Math.abs(c.g - newColor.g) < 5 && 
+                                Math.abs(c.b - newColor.b) < 5
+                              );
+                              
+                              if (!isDuplicate) {
+                                setTargetColors(prev => [...prev, newColor]);
+                              }
+                            }}
+                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  
+                  {targetColors.length === 0 && videoSrc && (
+                    <p className="text-[9px] text-[#555] italic mt-4 font-serif">Click the pipette to sample colors. Tip: Pick the shadow as a 2nd color.</p>
+                  )}
+                  {targetColors.length > 0 && videoSrc && contiguous && (
+                    <p className="text-[9px] text-[#555] italic mt-4 font-serif">Tip: If "Contiguous" is missing enclosed gaps (like between arms), pick a color inside that gap to force its removal.</p>
+                  )}
+                </div>
+
+                {/* Adjustments */}
+                {videoSrc && (
+                  <div className="space-y-6">
+                    <h3 className="text-[9px] uppercase tracking-widest text-[#555] border-b border-[#222] pb-2">Matte Generation</h3>
+                    
+                    <div className="group">
+                      <div className="flex justify-between text-[10px] uppercase tracking-widest mb-3">
+                        <span className="text-[#888]">Similarity</span>
+                        <span className="font-mono text-white">{similarity}%</span>
+                      </div>
+                      <input 
+                        type="range" min="0" max="100" value={similarity} 
+                        onChange={(e) => setSimilarity(Number(e.target.value))}
+                        className="w-full h-[2px] bg-[#222] appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
+                      />
+                    </div>
+                    
+                    <div className="group">
+                      <div className="flex justify-between text-[10px] uppercase tracking-widest mb-3">
+                        <span className="text-[#888]">Color Blend</span>
+                        <span className="font-mono text-white">{colorBlend}%</span>
+                      </div>
+                      <input 
+                        type="range" min="0" max="100" value={colorBlend} 
+                        onChange={(e) => setColorBlend(Number(e.target.value))}
+                        className="w-full h-[2px] bg-[#222] appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
+                      />
+                    </div>
+                    
+                    <div className="group">
+                      <div className="flex justify-between text-[10px] uppercase tracking-widest mb-3">
+                        <span className="text-[#888]">Shading Tolerance</span>
+                        <span className="font-mono text-white">{shadingTolerance}%</span>
+                      </div>
+                      <input 
+                        type="range" min="0" max="100" value={shadingTolerance} 
+                        onChange={(e) => setShadingTolerance(Number(e.target.value))}
+                        className="w-full h-[2px] bg-[#222] appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
+                      />
+                    </div>
+
+                    <div className="group flex items-center justify-between mb-4">
+                      <span className="text-[10px] uppercase tracking-widest text-[#888]">Contiguous (Protect Subject)</span>
+                      <button 
+                        onClick={() => setContiguous(!contiguous)}
+                        className={`w-8 h-4 rounded-full relative transition-colors ${contiguous ? 'bg-[#1DB954]' : 'bg-[#333]'}`}
+                      >
+                        <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${contiguous ? 'left-[18px]' : 'left-0.5'}`} />
+                      </button>
+                    </div>
+
+                    <h3 className="text-[9px] uppercase tracking-widest text-[#555] border-b border-[#222] pb-2 pt-2">Matte Cleanup</h3>
+
+                    <div className="group">
+                      <div className="flex justify-between text-[10px] uppercase tracking-widest mb-3">
+                        <span className="text-[#888]">Edge Shift (Choke)</span>
+                        <span className="font-mono text-white">{edgeShift > 0 ? '+' : ''}{edgeShift}%</span>
+                      </div>
+                      <input 
+                        type="range" min="-100" max="100" value={edgeShift} 
+                        onChange={(e) => setEdgeShift(Number(e.target.value))}
+                        className="w-full h-[2px] bg-[#222] appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
+                      />
+                    </div>
+
+                    <div className="group">
+                      <div className="flex justify-between text-[10px] uppercase tracking-widest mb-3">
+                        <span className="text-[#888]">Edge Softness</span>
+                        <span className="font-mono text-white">{edgeSoftness}%</span>
+                      </div>
+                      <input 
+                        type="range" min="0" max="100" value={edgeSoftness} 
+                        onChange={(e) => setEdgeSoftness(Number(e.target.value))}
+                        className="w-full h-[2px] bg-[#222] appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
+                      />
+                    </div>
+
+                    <div className="group">
+                      <div className="flex justify-between text-[10px] uppercase tracking-widest mb-3">
+                        <span className="text-[#888]">Spill Suppression</span>
+                        <span className="font-mono text-white">{spillSuppression}%</span>
+                      </div>
+                      <input 
+                        type="range" min="0" max="100" value={spillSuppression} 
+                        onChange={(e) => setSpillSuppression(Number(e.target.value))}
+                        className="w-full h-[2px] bg-[#222] appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
+                      />
+                    </div>
+
+                    <h3 className="text-[9px] uppercase tracking-widest text-[#555] border-b border-[#222] pb-2 pt-2">Stroke / Outline</h3>
+
+                    <div className="group">
+                      <div className="flex justify-between text-[10px] uppercase tracking-widest mb-3">
+                        <span className="text-[#888]">Stroke Width</span>
+                        <span className="font-mono text-white">{strokeWidth}px</span>
+                      </div>
+                      <input 
+                        type="range" min="0" max="20" value={strokeWidth} 
+                        onChange={(e) => setStrokeWidth(Number(e.target.value))}
+                        className="w-full h-[2px] bg-[#222] appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:rounded-full cursor-pointer"
+                      />
+                    </div>
+
+                    <div className="group">
+                      <div className="flex justify-between items-center text-[10px] uppercase tracking-widest mb-3">
+                        <span className="text-[#888]">Stroke Color</span>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-white">{strokeColor.toUpperCase()}</span>
+                          <input 
+                            type="color" 
+                            value={strokeColor}
+                            onChange={(e) => setStrokeColor(e.target.value)}
+                            className="w-6 h-6 p-0 border-0 outline-none cursor-pointer rounded-full overflow-hidden [&::-webkit-color-swatch-wrapper]:p-0 [&::-webkit-color-swatch]:border-0 [&::-webkit-color-swatch]:rounded-full"
+                            title="Click to pick stroke color"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                </>
               )}
             </div>
           </div>
 
-          <div className="p-8 mt-auto bg-[#0F0F11]">
+          <div className={`p-5 sm:p-8 mt-auto bg-[#0F0F11] ${mobileTab === 'tune' ? 'hidden sm:block' : 'block'}`}>
             <h3 className="text-[10px] uppercase tracking-[0.2em] text-[#888] mb-4">Output Settings</h3>
             
             <div className="mb-4">
@@ -1138,20 +1791,20 @@ export default function App() {
         </aside>
       </main>
 
-      <footer className="h-12 border-t border-[#222] flex items-center px-8 justify-between bg-[#050505] shrink-0">
-        <div className="flex gap-8">
-          <span className="text-[9px] uppercase tracking-widest text-[#444]">Project: Alpha_Extract</span>
+      <footer className="h-10 sm:h-12 border-t border-[#222] flex items-center px-4 sm:px-8 justify-between bg-[#050505] shrink-0">
+        <div className="flex gap-4 sm:gap-8">
+          <span className="text-[8px] sm:text-[9px] uppercase tracking-widest text-[#444] hidden xs:inline">Alpha_Extract</span>
           {videoSrc && (
-            <span className="text-[9px] uppercase tracking-widest text-[#444]">
-              Status: {isExporting ? 'Exporting' : isPlaying ? 'Playing' : 'Ready'} | {formatTime(currentTime)}
+            <span className="text-[8px] sm:text-[9px] uppercase tracking-widest text-[#666] font-mono">
+              {isExporting ? 'Exporting' : isPlaying ? 'Playing' : 'Ready'} | {formatTime(currentTime)}
             </span>
           )}
         </div>
-        <div className="flex gap-4 items-center">
-          <div className="w-24 h-1 bg-[#222] overflow-hidden">
+        <div className="flex gap-3 sm:gap-4 items-center">
+          <div className="w-16 sm:w-24 h-1 bg-[#222] overflow-hidden">
             <div className="h-full bg-[#10B981] w-[45%]"></div>
           </div>
-          <span className="text-[9px] uppercase tracking-widest text-[#444]">Memory: Nominal</span>
+          <span className="text-[8px] sm:text-[9px] uppercase tracking-widest text-[#444]">GPU: Active</span>
         </div>
       </footer>
     </div>
