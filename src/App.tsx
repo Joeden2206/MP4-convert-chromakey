@@ -682,8 +682,8 @@ export default function App() {
 
                   <label className="flex items-center gap-2 bg-black/60 backdrop-blur-md border border-white/10 px-3 py-1.5 text-[9px] uppercase tracking-widest text-[#888] hover:text-white hover:border-white/30 transition-colors rounded-full cursor-pointer">
                     <Upload className="w-3 h-3" />
-                    {videoQueue.length > 0 ? 'Add Videos' : 'New Video'}
-                    <input type="file" accept="video/*" multiple className="hidden" onChange={handleFileUpload} />
+                    {videoQueue.length > 0 ? 'Replace Videos' : 'New Video'}
+                    <input type="file" accept="video/*" multiple className="hidden" onClick={(e) => { (e.target as HTMLInputElement).value = '' }} onChange={handleFileUpload} />
                   </label>
                 </div>
                 
@@ -764,7 +764,7 @@ export default function App() {
                    <span className="text-[10px] font-bold tracking-widest text-white uppercase">Upload Video</span>
                    <span className="text-[9px] uppercase tracking-widest text-[#666] mt-2">MP4 / WEBM</span>
                  </div>
-                 <input type="file" accept="video/*" multiple className="hidden" onChange={handleFileUpload} />
+                 <input type="file" accept="video/*" multiple className="hidden" onClick={(e) => { (e.target as HTMLInputElement).value = '' }} onChange={handleFileUpload} />
                </label>
             </div>
           )}
