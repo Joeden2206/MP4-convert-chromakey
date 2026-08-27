@@ -1,5 +1,13 @@
 import { FilesetResolver, ImageSegmenter } from '@mediapipe/tasks-vision';
-import { CustomMatteZone, extractMaskContour, renderVectorContourOverlay, applyCustomMatteZones, Point } from './vectorContour';
+import { 
+  CustomMatteZone, 
+  extractMaskContourSubpixel, 
+  fitBezierSplines, 
+  renderVectorSplineOverlay, 
+  traceVectorPath,
+  applyCustomMatteZones,
+  VectorContourPath
+} from './vectorContour';
 
 let segmenterInstance: ImageSegmenter | null = null;
 let initPromise: Promise<ImageSegmenter> | null = null;
@@ -10,6 +18,9 @@ let lowResMaskCtx: CanvasRenderingContext2D | null = null;
 
 let fullMaskCanvas: HTMLCanvasElement | null = null;
 let fullMaskCtx: CanvasRenderingContext2D | null = null;
+
+let vectorMaskCanvas: HTMLCanvasElement | null = null;
+let vectorMaskCtx: CanvasRenderingContext2D | null = null;
 
 export type AiMattingStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -85,26 +96,29 @@ export async function preloadAiSegmenter(onStatusChange?: (status: AiMattingStat
 }
 
 export interface AiMattingOptions {
-  threshold?: number;   // 10 to 90 (Subject confidence, default 50)
-  edgeShift?: number;   // -10 to +10 px (Choke inward to eat dark outline / expand, default -2)
-  smoothness?: number;  // 0 to 10 px (Anti-aliasing to remove spikes/gai, default 2)
-  feather?: number;     // 0 to 10 px (Soft edge blur, default 1)
-  defringe?: number;    // 0 to 100% (Remove dark/black halo along edge, default 40)
-  invert?: boolean;     // Invert mask (default false)
-  strokeWidth?: number; // Outline stroke width in px (default 0)
-  strokeColor?: string; // Outline stroke color in hex (default #ffffff)
+  threshold?: number;          // 10 to 90 (Subject confidence, default 50)
+  edgeShift?: number;          // -10 to +10 px (Choke inward to eat dark outline / expand, default -1.5)
+  smoothness?: number;         // 0 to 10 px (Sub-pixel anti-aliasing curve, default 2)
+  feather?: number;            // 0 to 10 px (Soft edge blur, default 1)
+  defringe?: number;           // 0 to 100% (Remove dark/light fringe along edge, default 40)
+  invert?: boolean;            // Invert mask (default false)
+  strokeWidth?: number;        // Outline stroke width in px (default 0)
+  strokeColor?: string;        // Outline stroke color in hex (default #ffffff)
   showVectorContour?: boolean; // Render interactive neon vector contour overlay
-  vectorContourColor?: string; // Color of vector contour (e.g. #00f0ff or #10b981)
+  vectorContourColor?: string;// Color of vector contour (e.g. #00f0ff or #10b981)
+  vectorCurveSmoothness?: number; // 0.05 to 0.65 (Bézier Tangent Handle Tension, default 0.35)
+  cornerThreshold?: number;    // 25 to 90 degrees (Sharp corner detection threshold, default 55)
+  useVectorMask?: boolean;     // Enable Vector Spline Bézier Clipping Mask for zero-aliasing (default true)
   customZones?: CustomMatteZone[]; // Custom exclusion / inclusion regions (Garbage Matte / Holdout Matte)
   originalSource?: HTMLVideoElement | HTMLCanvasElement; // For restoring holdout zones
 }
 
 /**
- * Fast 2-pass separable box blur on Alpha channel
+ * Fast 2-pass separable continuous Gaussian-like blur on Alpha channel
  */
 function fastBlurAlpha(data: Uint8ClampedArray, w: number, h: number, radius: number) {
   if (radius <= 0) return;
-  const r = Math.min(Math.floor(radius), 20);
+  const r = Math.min(Math.floor(radius), 16);
   if (r <= 0) return;
 
   const temp = new Uint8ClampedArray(w * h);
@@ -144,7 +158,7 @@ function fastBlurAlpha(data: Uint8ClampedArray, w: number, h: number, radius: nu
     }
   }
 
-  // Vertical pass directly into data
+  // Vertical pass
   for (let x = 0; x < w; x++) {
     let sum = 0;
     let count = 0;
@@ -175,43 +189,8 @@ function fastBlurAlpha(data: Uint8ClampedArray, w: number, h: number, radius: nu
 }
 
 /**
- * Morphological Erosion (Choke < 0) or Dilation (Choke > 0) on alpha channel
- */
-function applyAlphaErosionDilation(data: Uint8ClampedArray, w: number, h: number, radius: number, isDilation: boolean) {
-  if (radius <= 0) return;
-  const r = Math.min(Math.floor(radius), 15);
-  const temp = new Uint8ClampedArray(w * h);
-  for (let i = 0, j = 3; i < temp.length; i++, j += 4) {
-    temp[i] = data[j];
-  }
-
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      let target = isDilation ? 0 : 255;
-      for (let dy = -r; dy <= r; dy++) {
-        const ny = y + dy;
-        if (ny < 0 || ny >= h) continue;
-        for (let dx = -r; dx <= r; dx++) {
-          if (dx * dx + dy * dy > r * r) continue;
-          const nx = x + dx;
-          if (nx < 0 || nx >= w) continue;
-          const val = temp[ny * w + nx];
-          if (isDilation) {
-            if (val > target) target = val;
-          } else {
-            if (val < target) target = val;
-          }
-        }
-      }
-      data[(y * w + x) * 4 + 3] = target;
-    }
-  }
-}
-
-/**
- * Color Defringe / Decontamination:
- * Prevents dark/black outline artifacts by clamping border RGB values or
- * brightening dark-fringed semi-transparent pixels near the edge.
+ * Color Defringe / Spill Decontamination:
+ * Cleans fringe / halo colors by restoring true foreground color at alpha transition edges.
  */
 function applyDefringe(
   pixelData: Uint8ClampedArray,
@@ -228,9 +207,7 @@ function applyDefringe(
     // Target edge transition pixels with alpha between 5 and 245
     if (alpha > 5 && alpha < 245) {
       const aNorm = alpha / 255;
-      // If edge pixel has darkened RGB due to dark background bleed,
-      // un-premultiply / boost color luminance towards clean subject tone
-      const boost = 1.0 + (1.0 - aNorm) * factor * 0.8;
+      const boost = 1.0 + (1.0 - aNorm) * factor * 0.75;
 
       pixelData[i] = Math.min(255, Math.round(pixelData[i] * boost));
       pixelData[i + 1] = Math.min(255, Math.round(pixelData[i + 1] * boost));
@@ -241,7 +218,8 @@ function applyDefringe(
 
 /**
  * Applies AI-based segmentation and background removal directly to a canvas.
- * Preserves foreground subject and cleanly cuts out background with anti-aliasing & choke.
+ * Integrates Image Trace Vector Spline Fitting (Bézier Curves & Corner Tension)
+ * to ensure silky smooth vector contours without pixel aliasing.
  */
 export async function applyAiMatting(
   ctx: CanvasRenderingContext2D,
@@ -259,6 +237,9 @@ export async function applyAiMatting(
     strokeColor = '#ffffff',
     showVectorContour = false,
     vectorContourColor = '#00f0ff',
+    vectorCurveSmoothness = 0.38,
+    cornerThreshold = 55,
+    useVectorMask = true,
     customZones = [],
     originalSource,
   } = options;
@@ -291,31 +272,20 @@ export async function applyAiMatting(
   const maskImageData = lowResMaskCtx.createImageData(maskWidth, maskHeight);
   const maskData = maskImageData.data;
 
-  // Smooth S-curve mapping for confidence values
-  // Shift center with threshold & choke
-  const centerCutoff = Math.max(0.05, Math.min(0.95, threshold / 100 - edgeShift * 0.02));
-  const span = Math.max(0.04, 0.08 + smoothness * 0.02);
-
+  // Store continuous raw float confidence values
   for (let i = 0; i < maskFloats.length; i++) {
     const rawVal = maskFloats[i];
-    // Hermite Smoothstep transition
-    const t = Math.max(0, Math.min(1, (rawVal - (centerCutoff - span)) / (2 * span)));
-    let alpha = Math.round((t * t * (3 - 2 * t)) * 255);
-
-    if (invert) {
-      alpha = 255 - alpha;
-    }
-
+    const val = Math.max(0, Math.min(255, Math.round(rawVal * 255)));
     const idx = i * 4;
-    maskData[idx] = 255;
-    maskData[idx + 1] = 255;
-    maskData[idx + 2] = 255;
-    maskData[idx + 3] = alpha;
+    maskData[idx] = val;
+    maskData[idx + 1] = val;
+    maskData[idx + 2] = val;
+    maskData[idx + 3] = 255;
   }
 
   lowResMaskCtx.putImageData(maskImageData, 0, 0);
 
-  // 2. High-Resolution Full Size Mask Upscaling with Anti-Aliasing
+  // 2. High-Resolution Mask Upscaling
   if (!fullMaskCanvas) {
     fullMaskCanvas = document.createElement('canvas');
     fullMaskCtx = fullMaskCanvas.getContext('2d', { willReadFrequently: true });
@@ -333,35 +303,96 @@ export async function applyAiMatting(
   fullMaskCtx.imageSmoothingQuality = 'high';
   fullMaskCtx.drawImage(lowResMaskCanvas, 0, 0, fullMaskCanvas.width, fullMaskCanvas.height);
 
-  // 3. Post-process Full Mask (Choke & Smoothness Anti-Aliasing)
   const fullMaskImageData = fullMaskCtx.getImageData(0, 0, fullMaskCanvas.width, fullMaskCanvas.height);
   const fullData = fullMaskImageData.data;
   const w = fullMaskCanvas.width;
   const h = fullMaskCanvas.height;
 
-  // Apply erosion (Choke inward to eat away dark outlines) if edgeShift < 0
-  if (edgeShift < 0) {
-    const chokeRadius = Math.abs(edgeShift);
-    applyAlphaErosionDilation(fullData, w, h, chokeRadius, false);
-  } else if (edgeShift > 0) {
-    applyAlphaErosionDilation(fullData, w, h, edgeShift, true);
+  // Threshold cutoff shifted by edgeShift
+  const normShift = (edgeShift || 0) * 0.025;
+  const centerCutoff = Math.max(0.02, Math.min(0.98, (threshold / 100) - normShift));
+  const smoothKnee = Math.max(0.015, 0.03 + (smoothness * 0.015) + (feather * 0.02));
+
+  for (let i = 0; i < fullData.length; i += 4) {
+    const rawVal = fullData[i] / 255;
+    const t = Math.max(0, Math.min(1, (rawVal - (centerCutoff - smoothKnee)) / (2 * smoothKnee)));
+    let alpha = t * t * (3 - 2 * t);
+
+    if (invert) {
+      alpha = 1.0 - alpha;
+    }
+
+    const alpha255 = Math.round(alpha * 255);
+    fullData[i] = 255;
+    fullData[i + 1] = 255;
+    fullData[i + 2] = 255;
+    fullData[i + 3] = alpha255;
   }
 
-  // Anti-Aliasing Gaussian/Box blur on mask to eliminate jagged spikes ("gai")
-  const totalBlur = Math.max(0, smoothness + feather);
-  if (totalBlur > 0) {
-    fastBlurAlpha(fullData, w, h, totalBlur);
+  // 3. Extract Subpixel Vector Contours & Fit Bézier Splines (Image Trace Style)
+  const rawContours = extractMaskContourSubpixel(
+    fullData, 
+    w, 
+    h, 
+    Math.round(centerCutoff * 255), 
+    Math.max(2, Math.floor(4 - smoothness * 0.2))
+  );
+
+  const vectorPaths: VectorContourPath[] = rawContours.map((contour) =>
+    fitBezierSplines(contour, cornerThreshold, vectorCurveSmoothness)
+  );
+
+  // 4. If Vector Mask Mode is enabled, render GPU-accelerated ultra-smooth Bézier path
+  if (useVectorMask && vectorPaths.length > 0) {
+    if (!vectorMaskCanvas) {
+      vectorMaskCanvas = document.createElement('canvas');
+      vectorMaskCtx = vectorMaskCanvas.getContext('2d', { willReadFrequently: true });
+    }
+    if (vectorMaskCanvas.width !== w || vectorMaskCanvas.height !== h) {
+      vectorMaskCanvas.width = w;
+      vectorMaskCanvas.height = h;
+    }
+
+    if (vectorMaskCtx) {
+      vectorMaskCtx.clearRect(0, 0, w, h);
+      vectorMaskCtx.fillStyle = '#ffffff';
+
+      // Draw all smooth vector paths
+      vectorMaskCtx.beginPath();
+      for (const vp of vectorPaths) {
+        traceVectorPath(vectorMaskCtx, vp);
+      }
+      vectorMaskCtx.fill();
+
+      // If feather or smoothness is requested, apply subtle alpha blur to the vector mask
+      const vBlurRadius = Math.max(0, Math.floor(feather * 0.7));
+      if (vBlurRadius > 0) {
+        const vImg = vectorMaskCtx.getImageData(0, 0, w, h);
+        fastBlurAlpha(vImg.data, w, h, vBlurRadius);
+        vectorMaskCtx.putImageData(vImg, 0, 0);
+      }
+
+      // Apply Vector Mask to canvas
+      ctx.save();
+      ctx.globalCompositeOperation = 'destination-in';
+      ctx.drawImage(vectorMaskCanvas, 0, 0, w, h);
+      ctx.restore();
+    }
+  } else {
+    // Standard Continuous Pixel Mask
+    const blurRadius = Math.max(0, Math.floor(smoothness * 0.6 + feather * 0.8));
+    if (blurRadius > 0) {
+      fastBlurAlpha(fullData, w, h, blurRadius);
+    }
+    fullMaskCtx.putImageData(fullMaskImageData, 0, 0);
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-in';
+    ctx.drawImage(fullMaskCanvas, 0, 0, canvas.width, canvas.height);
+    ctx.restore();
   }
 
-  fullMaskCtx.putImageData(fullMaskImageData, 0, 0);
-
-  // 4. Composite Mask onto canvas using destination-in
-  ctx.save();
-  ctx.globalCompositeOperation = 'destination-in';
-  ctx.drawImage(fullMaskCanvas, 0, 0, canvas.width, canvas.height);
-  ctx.restore();
-
-  // 5. Apply Defringe / Decontaminate to eliminate black borders & halos
+  // 5. Apply Defringe / Decontaminate to eliminate fringe/halos
   if (defringe > 0) {
     const finalImgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     applyDefringe(finalImgData.data, canvas.width, canvas.height, defringe);
@@ -376,8 +407,7 @@ export async function applyAiMatting(
     const radius = Math.floor(strokeWidth);
     const origData = new Uint8ClampedArray(pixelData);
 
-    applyAlphaErosionDilation(pixelData, w, h, radius, true);
-    fastBlurAlpha(pixelData, w, h, Math.max(1, Math.floor(radius / 3)));
+    fastBlurAlpha(pixelData, w, h, Math.max(1, radius));
 
     const hex = strokeColor.replace('#', '');
     const sR = parseInt(hex.substring(0, 2), 16) || 255;
@@ -419,11 +449,9 @@ export async function applyAiMatting(
     applyCustomMatteZones(ctx, originalSource || canvas, customZones, canvas.width, canvas.height);
   }
 
-  // 8. Vector Contour Overlay (Real-time GPU Vector Line Rendering)
-  if (showVectorContour && fullMaskCtx) {
-    const maskImg = fullMaskCtx.getImageData(0, 0, fullMaskCanvas.width, fullMaskCanvas.height);
-    const contours = extractMaskContour(maskImg.data, fullMaskCanvas.width, fullMaskCanvas.height, 128, 4);
-    renderVectorContourOverlay(ctx, contours, vectorContourColor, 2);
+  // 8. Vector Contour Overlay with Bézier Splines & Glow
+  if (showVectorContour && vectorPaths.length > 0) {
+    renderVectorSplineOverlay(ctx, vectorPaths, vectorContourColor, 2.5);
   }
 
   // Free memory
