@@ -41,7 +41,7 @@ export default function App() {
   const [vectorContourColor, setVectorContourColor] = useState('#00f0ff');
   const [vectorCurveSmoothness, setVectorCurveSmoothness] = useState(0.38); // Bézier Tangent Tension
   const [cornerThreshold, setCornerThreshold] = useState(55); // Sharp corner threshold in degrees
-  const [useVectorMask, setUseVectorMask] = useState(true);
+  const [useVectorMask, setUseVectorMask] = useState(false);
   const [customZones, setCustomZones] = useState<CustomMatteZone[]>([]);
   const [activeMatteTool, setActiveMatteTool] = useState<MatteToolType>('none');
   const [drawingStart, setDrawingStart] = useState<{ x: number; y: number } | null>(null);
@@ -174,6 +174,7 @@ export default function App() {
     const hiddenCanvas = hiddenCanvasRef.current;
     if (!video || !canvas || !hiddenCanvas || isExporting) return;
     if (isDrawingRef.current) return;
+    if (video.readyState < 2) return;
     
     if (video.videoWidth > 0 && video.videoHeight > 0) {
       isDrawingRef.current = true;

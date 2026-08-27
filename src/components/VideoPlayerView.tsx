@@ -138,7 +138,10 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
             className="hidden" 
             muted 
             playsInline
-            crossOrigin="anonymous"
+            crossOrigin={videoSrc?.startsWith('http') ? 'anonymous' : undefined}
+            onError={(e) => {
+              console.warn('Video element warning:', e);
+            }}
             onLoadedMetadata={() => {
                if (videoRef.current && canvasRef.current) {
                    canvasRef.current.width = videoRef.current.videoWidth;

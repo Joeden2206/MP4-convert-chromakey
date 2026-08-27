@@ -24,6 +24,19 @@ export interface CustomMatteZone {
   points: Point[]; // normalized (0..1) relative to video dimensions
 }
 
+let cachedGrid: Float32Array | null = null;
+let cachedVisitedCells: Uint8Array | null = null;
+
+function getContourBuffers(gridSize: number, cellCount: number) {
+  if (!cachedGrid || cachedGrid.length < gridSize) {
+    cachedGrid = new Float32Array(gridSize);
+  }
+  if (!cachedVisitedCells || cachedVisitedCells.length < cellCount) {
+    cachedVisitedCells = new Uint8Array(cellCount);
+  }
+  return { grid: cachedGrid, visited: cachedVisitedCells };
+}
+
 /**
  * Subpixel Marching Squares with Bilinear / Isoline Interpolation
  * Extracts smooth continuous boundary contours without integer pixel staircases.
@@ -33,11 +46,14 @@ export function extractMaskContourSubpixel(
   width: number,
   height: number,
   threshold: number = 128,
-  step: number = 4
+  step: number = 4,
+  scaleX: number = 1,
+  scaleY: number = 1
 ): Point[][] {
   const contours: Point[][] = [];
   const cols = Math.floor(width / step);
   const rows = Math.floor(height / step);
+  if (cols <= 1 || rows <= 1) return contours;
 
   const getSample = (x: number, y: number): number => {
     const px = Math.max(0, Math.min(width - 1, Math.round(x)));
@@ -50,8 +66,12 @@ export function extractMaskContourSubpixel(
     }
   };
 
+  const gridSize = (cols + 1) * (rows + 1);
+  const cellCount = cols * rows;
+  const { grid, visited: visitedCells } = getContourBuffers(gridSize, cellCount);
+  visitedCells.fill(0, 0, cellCount);
+
   // 2D grid sample values
-  const grid = new Float32Array((cols + 1) * (rows + 1));
   for (let r = 0; r <= rows; r++) {
     const y = Math.min(height - 1, r * step);
     const rOffset = r * (cols + 1);
@@ -60,10 +80,6 @@ export function extractMaskContourSubpixel(
       grid[rOffset + c] = getSample(x, y);
     }
   }
-
-  // Horizontal edges & vertical edges flags to trace loops
-  // Edge lookup: cell has top (0), right (1), bottom (2), left (3)
-  const visitedCells = new Uint8Array(cols * rows);
 
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
@@ -121,10 +137,10 @@ export function extractMaskContourSubpixel(
           return Math.max(0.05, Math.min(0.95, (threshold - va) / diff));
         };
 
-        const topPt: Point = { x: cX + step * interp(val0, val1), y: cY };
-        const rightPt: Point = { x: cX + step, y: cY + step * interp(val1, val2) };
-        const bottomPt: Point = { x: cX + step * interp(val3, val2), y: cY + step };
-        const leftPt: Point = { x: cX, y: cY + step * interp(val0, val3) };
+        const topPt: Point = { x: (cX + step * interp(val0, val1)) * scaleX, y: cY * scaleY };
+        const rightPt: Point = { x: (cX + step) * scaleX, y: (cY + step * interp(val1, val2)) * scaleY };
+        const bottomPt: Point = { x: (cX + step * interp(val3, val2)) * scaleX, y: (cY + step) * scaleY };
+        const leftPt: Point = { x: cX * scaleX, y: (cY + step * interp(val0, val3)) * scaleY };
 
         const cVal = ((val0 >= threshold ? 1 : 0) << 3) |
                      ((val1 >= threshold ? 1 : 0) << 2) |
