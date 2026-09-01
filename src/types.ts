@@ -25,6 +25,9 @@ export type AspectRatioType = 'original' | '1:1' | '9:16' | '16:9';
 export type MatteToolType = 'none' | 'remove_rect' | 'keep_rect';
 export type MobileTab = 'view' | 'tune' | 'export';
 
+export type OutputSizeMode = 'original' | 'scale' | 'custom' | 'preset';
+export type OutputFitMode = 'contain' | 'cover' | 'stretch';
+
 export interface CropDimensions {
   sx: number;
   sy: number;
@@ -32,4 +35,8 @@ export interface CropDimensions {
   sh: number;
   dw: number;
   dh: number;
+  outW: number;
+  outH: number;
+  dx: number;
+  dy: number;
 }

@@ -3,7 +3,8 @@ import { Pipette, Sparkles } from 'lucide-react';
 import { AiMattingStatus } from '../../lib/aiMatting';
 import {
   ExtractionMode, MobileTab, RGBColor, CustomMatteZone,
-  MatteToolType, AspectRatioType, VideoItem
+  MatteToolType, AspectRatioType, VideoItem,
+  OutputSizeMode, OutputFitMode
 } from '../../types';
 import { AiMatteControls } from './AiMatteControls';
 import { ChromaKeyControls } from './ChromaKeyControls';
@@ -73,6 +74,20 @@ interface SidebarProps {
   // Output props
   aspectRatio: AspectRatioType;
   setAspectRatio: (ratio: AspectRatioType) => void;
+  outputSizeMode: OutputSizeMode;
+  setOutputSizeMode: (mode: OutputSizeMode) => void;
+  outputScale: number;
+  setOutputScale: (scale: number) => void;
+  customWidth: number;
+  setCustomWidth: (w: number) => void;
+  customHeight: number;
+  setCustomHeight: (h: number) => void;
+  lockAspectRatio: boolean;
+  setLockAspectRatio: (lock: boolean) => void;
+  outputFitMode: OutputFitMode;
+  setOutputFitMode: (mode: OutputFitMode) => void;
+  videoWidth: number;
+  videoHeight: number;
   gifFps: number;
   setGifFps: (fps: number) => void;
   gifFrameLimit: number;
@@ -150,6 +165,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
   removeColor,
   aspectRatio,
   setAspectRatio,
+  outputSizeMode,
+  setOutputSizeMode,
+  outputScale,
+  setOutputScale,
+  customWidth,
+  setCustomWidth,
+  customHeight,
+  setCustomHeight,
+  lockAspectRatio,
+  setLockAspectRatio,
+  outputFitMode,
+  setOutputFitMode,
+  videoWidth,
+  videoHeight,
   gifFps,
   setGifFps,
   gifFrameLimit,
@@ -281,6 +310,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <OutputSettings
           aspectRatio={aspectRatio}
           setAspectRatio={setAspectRatio}
+          outputSizeMode={outputSizeMode}
+          setOutputSizeMode={setOutputSizeMode}
+          outputScale={outputScale}
+          setOutputScale={setOutputScale}
+          customWidth={customWidth}
+          setCustomWidth={setCustomWidth}
+          customHeight={customHeight}
+          setCustomHeight={setCustomHeight}
+          lockAspectRatio={lockAspectRatio}
+          setLockAspectRatio={setLockAspectRatio}
+          outputFitMode={outputFitMode}
+          setOutputFitMode={setOutputFitMode}
+          videoWidth={videoWidth}
+          videoHeight={videoHeight}
           gifFps={gifFps}
           setGifFps={setGifFps}
           gifFrameLimit={gifFrameLimit}

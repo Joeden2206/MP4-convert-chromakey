@@ -389,11 +389,16 @@ export const VideoPlayerView: React.FC<VideoPlayerViewProps> = ({
               </div>
             )}
 
-            <div className="absolute bottom-3 sm:bottom-6 left-3 sm:left-6 flex items-center gap-2 sm:gap-3 bg-black/80 px-2.5 sm:px-3 py-1 sm:py-2 border border-white/10 backdrop-blur-md rounded-md">
+            <div className="absolute bottom-3 sm:bottom-6 left-3 sm:left-6 flex items-center gap-2 sm:gap-3 bg-black/80 px-2.5 sm:px-3 py-1 sm:py-2 border border-white/10 backdrop-blur-md rounded-md z-20">
               <div className={`w-1.5 h-1.5 sm:w-2 sm:h-2 rounded-full ${isPlaying ? 'bg-green-500 animate-pulse' : 'bg-red-500'}`}></div>
               <span className="text-[8px] sm:text-[10px] font-mono tracking-tighter">
                 {showOriginal || isPicking ? 'ORIGINAL' : 'PREVIEW'}
               </span>
+              {canvasRef.current && canvasRef.current.width > 0 && (
+                <span className="text-[8px] sm:text-[9px] font-mono text-[#888] border-l border-white/15 pl-2 sm:pl-2.5">
+                  {canvasRef.current.width} × {canvasRef.current.height}
+                </span>
+              )}
             </div>
           </div>
 

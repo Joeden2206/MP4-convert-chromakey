@@ -6,7 +6,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   RGBColor, CustomMatteZone, VideoItem, ExtractionMode,
-  BgMode, AspectRatioType, MatteToolType, MobileTab
+  BgMode, AspectRatioType, MatteToolType, MobileTab,
+  OutputSizeMode, OutputFitMode
 } from './types';
 import { applyChromaKey } from './lib/chromaKey';
 import { applyAiMatting, preloadAiSegmenter, AiMattingStatus } from './lib/aiMatting';
@@ -74,6 +75,12 @@ export default function App() {
   const [bgMode, setBgMode] = useState<BgMode>('transparent');
   const [customBgColor, setCustomBgColor] = useState('#00ff00');
   const [aspectRatio, setAspectRatio] = useState<AspectRatioType>('original');
+  const [outputSizeMode, setOutputSizeMode] = useState<OutputSizeMode>('original');
+  const [outputScale, setOutputScale] = useState(1.0);
+  const [customWidth, setCustomWidth] = useState(0);
+  const [customHeight, setCustomHeight] = useState(0);
+  const [lockAspectRatio, setLockAspectRatio] = useState(true);
+  const [outputFitMode, setOutputFitMode] = useState<OutputFitMode>('contain');
   const [isDragging, setIsDragging] = useState(false);
   const [gifFps, setGifFps] = useState(12);
   const [gifFrameLimit, setGifFrameLimit] = useState(100);
@@ -141,6 +148,12 @@ export default function App() {
         if (parsed.bgMode !== undefined) setBgMode(parsed.bgMode);
         if (parsed.customBgColor !== undefined) setCustomBgColor(parsed.customBgColor);
         if (parsed.aspectRatio !== undefined) setAspectRatio(parsed.aspectRatio);
+        if (parsed.outputSizeMode !== undefined) setOutputSizeMode(parsed.outputSizeMode);
+        if (parsed.outputScale !== undefined) setOutputScale(parsed.outputScale);
+        if (parsed.customWidth !== undefined) setCustomWidth(parsed.customWidth);
+        if (parsed.customHeight !== undefined) setCustomHeight(parsed.customHeight);
+        if (parsed.lockAspectRatio !== undefined) setLockAspectRatio(parsed.lockAspectRatio);
+        if (parsed.outputFitMode !== undefined) setOutputFitMode(parsed.outputFitMode);
         if (parsed.gifFps !== undefined) setGifFps(parsed.gifFps);
         if (parsed.gifFrameLimit !== undefined) setGifFrameLimit(parsed.gifFrameLimit);
         if (parsed.isGifLooping !== undefined) setIsGifLooping(parsed.isGifLooping);
@@ -157,6 +170,7 @@ export default function App() {
       showVectorContour, vectorContourColor, vectorCurveSmoothness, cornerThreshold, useVectorMask, customZones,
       targetColors, similarity, colorBlend, shadingTolerance, contiguous, spillSuppression,
       strokeWidth, strokeColor, edgeShift, edgeSoftness, useDithering, bgMode, customBgColor, aspectRatio,
+      outputSizeMode, outputScale, customWidth, customHeight, lockAspectRatio, outputFitMode,
       gifFps, gifFrameLimit, isGifLooping
     };
     localStorage.setItem('chromaKeySettings', JSON.stringify(settings));
@@ -165,6 +179,7 @@ export default function App() {
     showVectorContour, vectorContourColor, vectorCurveSmoothness, cornerThreshold, useVectorMask, customZones,
     targetColors, similarity, colorBlend, shadingTolerance, contiguous, spillSuppression,
     strokeWidth, strokeColor, edgeShift, edgeSoftness, useDithering, bgMode, customBgColor, aspectRatio,
+    outputSizeMode, outputScale, customWidth, customHeight, lockAspectRatio, outputFitMode,
     gifFps, gifFrameLimit, isGifLooping
   ]);
 
@@ -233,18 +248,32 @@ export default function App() {
           }
         }
 
-        // 4. Calculate crop dimensions
-        const dims = getCropDimensions(video.videoWidth, video.videoHeight, aspectRatio);
-        if (canvas.width !== Math.floor(dims.dw) || canvas.height !== Math.floor(dims.dh)) {
-          canvas.width = Math.floor(dims.dw);
-          canvas.height = Math.floor(dims.dh);
+        // 4. Calculate crop dimensions & output scale
+        const dims = getCropDimensions(
+          video.videoWidth,
+          video.videoHeight,
+          aspectRatio,
+          outputSizeMode,
+          outputScale,
+          customWidth,
+          customHeight,
+          outputFitMode
+        );
+
+        if (canvas.width !== Math.floor(dims.outW) || canvas.height !== Math.floor(dims.outH)) {
+          canvas.width = Math.floor(dims.outW);
+          canvas.height = Math.floor(dims.outH);
         }
 
-        // 5. Draw the CROPPED result from the hidden canvas to the visible canvas
+        // 5. Draw the CROPPED & SCALED result from the hidden canvas to the visible canvas
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
         if (ctx && canvas.width > 0 && canvas.height > 0) {
           ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(hiddenCanvas, dims.sx, dims.sy, dims.sw, dims.sh, 0, 0, canvas.width, canvas.height);
+          ctx.drawImage(
+            hiddenCanvas,
+            dims.sx, dims.sy, dims.sw, dims.sh,
+            dims.dx, dims.dy, dims.dw, dims.dh
+          );
         }
       } catch (err) {
         console.error('Frame render error:', err);
@@ -279,7 +308,12 @@ export default function App() {
     strokeColor,
     isPicking,
     showOriginal,
-    aspectRatio
+    aspectRatio,
+    outputSizeMode,
+    outputScale,
+    customWidth,
+    customHeight,
+    outputFitMode
   ]);
 
   // Handle continuous playback loop
@@ -364,13 +398,29 @@ export default function App() {
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!isPicking || !videoRef.current || !canvasRef.current || !hiddenCanvasRef.current) return;
     
+    const dims = getCropDimensions(
+      videoRef.current.videoWidth,
+      videoRef.current.videoHeight,
+      aspectRatio,
+      outputSizeMode,
+      outputScale,
+      customWidth,
+      customHeight,
+      outputFitMode
+    );
+
     const rect = canvasRef.current.getBoundingClientRect();
-    const scaleX = canvasRef.current.width / rect.width;
-    const scaleY = canvasRef.current.height / rect.height;
+    const clickCanvasX = (e.clientX - rect.left) * (canvasRef.current.width / rect.width);
+    const clickCanvasY = (e.clientY - rect.top) * (canvasRef.current.height / rect.height);
     
-    const x = Math.floor((e.clientX - rect.left) * scaleX);
-    const y = Math.floor((e.clientY - rect.top) * scaleY);
-    
+    // Check if click is inside the drawn content frame (dims.dx, dims.dy, dims.dw, dims.dh)
+    const relX = (clickCanvasX - dims.dx) / (dims.dw || 1);
+    const relY = (clickCanvasY - dims.dy) / (dims.dh || 1);
+    if (relX < 0 || relX > 1 || relY < 0 || relY > 1) return;
+
+    const sourceX = Math.floor(dims.sx + relX * dims.sw);
+    const sourceY = Math.floor(dims.sy + relY * dims.sh);
+
     const hiddenCanvas = hiddenCanvasRef.current;
     const hCtx = hiddenCanvas.getContext('2d', { willReadFrequently: true });
     if (!hCtx) return;
@@ -379,8 +429,8 @@ export default function App() {
     hiddenCanvas.height = videoRef.current.videoHeight;
     hCtx.drawImage(videoRef.current, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
     
-    const pixel = hCtx.getImageData(x, y, 1, 1).data;
-    const newColor: RGBColor = { r: pixel[0], g: pixel[1], b: pixel[2], x, y };
+    const pixel = hCtx.getImageData(sourceX, sourceY, 1, 1).data;
+    const newColor: RGBColor = { r: pixel[0], g: pixel[1], b: pixel[2], x: sourceX, y: sourceY };
     
     const isDuplicate = targetColors.some(c => 
       Math.abs(c.r - newColor.r) < 5 && 
@@ -463,9 +513,18 @@ export default function App() {
       video.pause();
       video.currentTime = 0;
       
-      const dims = getCropDimensions(video.videoWidth, video.videoHeight, aspectRatio);
-      canvas.width = Math.floor(dims.dw);
-      canvas.height = Math.floor(dims.dh);
+      const dims = getCropDimensions(
+        video.videoWidth,
+        video.videoHeight,
+        aspectRatio,
+        outputSizeMode,
+        outputScale,
+        customWidth,
+        customHeight,
+        outputFitMode
+      );
+      canvas.width = Math.floor(dims.outW);
+      canvas.height = Math.floor(dims.outH);
       
       const stream = canvas.captureStream(30); 
       let options = { mimeType: 'video/webm; codecs=vp8' };
@@ -542,7 +601,11 @@ export default function App() {
             }
             
             ctx.clearRect(0, 0, canvas.width, canvas.height);
-            ctx.drawImage(hiddenCanvas, dims.sx, dims.sy, dims.sw, dims.sh, 0, 0, canvas.width, canvas.height);
+            ctx.drawImage(
+              hiddenCanvas,
+              dims.sx, dims.sy, dims.sw, dims.sh,
+              dims.dx, dims.dy, dims.dw, dims.dh
+            );
           }
         }
         
@@ -571,11 +634,20 @@ export default function App() {
     video.pause();
     video.currentTime = 0;
 
-    const dims = getCropDimensions(video.videoWidth, video.videoHeight, aspectRatio);
-    const maxGifWidth = 600;
-    const scale = dims.dw > maxGifWidth ? maxGifWidth / dims.dw : 1;
-    canvas.width = Math.floor(dims.dw * scale);
-    canvas.height = Math.floor(dims.dh * scale);
+    const dims = getCropDimensions(
+      video.videoWidth,
+      video.videoHeight,
+      aspectRatio,
+      outputSizeMode,
+      outputScale,
+      customWidth,
+      customHeight,
+      outputFitMode
+    );
+    const maxGifWidth = 800;
+    const gifScale = dims.outW > maxGifWidth ? maxGifWidth / dims.outW : 1;
+    canvas.width = Math.max(2, Math.floor(dims.outW * gifScale));
+    canvas.height = Math.max(2, Math.floor(dims.outH * gifScale));
 
     const gif = new GIFEncoder();
     const fps = gifFps || 12; 
@@ -637,7 +709,14 @@ export default function App() {
           }
           
           ctx.clearRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(hiddenCanvas, dims.sx, dims.sy, dims.sw, dims.sh, 0, 0, canvas.width, canvas.height);
+          ctx.drawImage(
+            hiddenCanvas,
+            dims.sx, dims.sy, dims.sw, dims.sh,
+            Math.floor(dims.dx * gifScale),
+            Math.floor(dims.dy * gifScale),
+            Math.floor(dims.dw * gifScale),
+            Math.floor(dims.dh * gifScale)
+          );
         }
         
         const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -900,6 +979,20 @@ export default function App() {
           removeColor={removeColor}
           aspectRatio={aspectRatio}
           setAspectRatio={setAspectRatio}
+          outputSizeMode={outputSizeMode}
+          setOutputSizeMode={setOutputSizeMode}
+          outputScale={outputScale}
+          setOutputScale={setOutputScale}
+          customWidth={customWidth}
+          setCustomWidth={setCustomWidth}
+          customHeight={customHeight}
+          setCustomHeight={setCustomHeight}
+          lockAspectRatio={lockAspectRatio}
+          setLockAspectRatio={setLockAspectRatio}
+          outputFitMode={outputFitMode}
+          setOutputFitMode={setOutputFitMode}
+          videoWidth={videoRef.current?.videoWidth || 0}
+          videoHeight={videoRef.current?.videoHeight || 0}
           gifFps={gifFps}
           setGifFps={setGifFps}
           gifFrameLimit={gifFrameLimit}
